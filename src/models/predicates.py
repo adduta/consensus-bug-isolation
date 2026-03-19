@@ -1,8 +1,5 @@
 import operator as op
 
-from .messages import Proposal, Validation
-
-Message = Proposal | Validation
 # Assertion = (Callable[[Message, set[int], Message, set[int]], bool], str)
 
 # senders_equal: Assertion = (lambda l, ls, r, rs: ls == rs, 'senders equal')
@@ -26,7 +23,7 @@ class Assertion():
         self.fieldR = fieldR
         self.op = op
 
-    def eval(self, l: Message, r: Message) -> bool:
+    def eval(self, l, r) -> bool:
         return self.op(getattr(l, self.fieldL), getattr(r, self.fieldR))
 
     def __str__(self) -> str:
@@ -52,7 +49,7 @@ class Predicate:
         self.observed = False
         self.observed_true = False
 
-    def eval(self, l: Message, r: Message):
+    def eval(self, l, r):
         if self.observed_true or not (isinstance(l, self.typeL) and isinstance(r, self.typeR) and self.threshold <= len(l.peers)):
             return False
         self.observed = True
