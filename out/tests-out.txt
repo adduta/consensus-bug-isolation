@@ -1,0 +1,56 @@
+Tests with -D0-C1-ss
+#Minutes: 18.5645 
+
+
+Tests with -D0-C1-as
+#Minutes: 18.8393 
+
+
+Tests with -D0-C2-ss
+#Minutes: 19.5645 
+
+
+Tests with -D0-C2-as
+#Minutes: 19.6026 
+
+
+Tests with -D1-C0
+#Minutes: 34.0079 
+
+
+Tests with -D1-C1-ss
+#Minutes: 35.0773 
+
+
+Tests with -D1-C1-as
+#Minutes: 36.0846 
+
+
+Tests with -D1-C2-ss
+#Minutes: 35.8733 
+
+
+Tests with -D1-C2-as
+#Minutes: 37.3058 
+
+
+Tests with -D2-C0
+#Minutes: 46.0594 
+
+
+Tests with -D2-C1-ss
+#Minutes: 46.6900 
+
+
+Tests with -D2-C1-as
+#Minutes: 947.8650 
+
+
+Tests with -D2-C2-ss
+#Minutes: 47.2202 
+
+
+Tests with -D2-C2-as
+#Minutes: 50.8456 
+
+

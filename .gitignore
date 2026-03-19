@@ -2,3 +2,7 @@ venv
 predicates-cache-*
 __pycache__
 cache/
+.idea/
+.serena/
+.claude
+.DS_Store

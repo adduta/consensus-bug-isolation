@@ -1,0 +1,6 @@
+../out/tests-D1-C2-as/out100.txt
+../out/tests-D1-C2-as/out109.txt
+../out/tests-D1-C2-as/out120.txt
+../out/tests-D1-C2-as/out130.txt
+../out/tests-D1-C2-as/out43.txt
+../out/tests-D1-C2-as/out126.txt
