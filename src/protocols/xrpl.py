@@ -108,3 +108,11 @@ def _new_incompatible_ledger(path: str) -> bool:
         len(nodes.intersection({0, 1, 2, 3, 4})) > 1 or
         len(nodes.intersection({2, 3, 4, 5, 6})) > 1
     )
+
+# Filter out predicates involving consensus_hash
+# (These tend to produce less useful fault localization results)
+def filter_aggregation(aggregation: dict) -> dict:
+    return {x: y for x, y in aggregation.items() if 'consensus_hash' not in x}
+
+def get_run_directories(path: str) -> list[str]:
+    return [os.path.join(path, d) for d in os.listdir(path) if os.path.isdir(os.path.join(path, d))]

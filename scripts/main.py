@@ -1,6 +1,7 @@
 """
 Main Analysis Pipeline for Consensus Bug Isolation
 
+# v1
 This module orchestrates the two-phase analysis pipeline:
 
 Phase 1 - Cache Generation:
@@ -14,6 +15,10 @@ Phase 2 - Statistical Fault Localization:
   - Uses statistical fault localization (Tarantula-based) to identify suspicious predicates
   - Recursively isolates failure-causing predicates by importance score
 
+# v2 - refactored to use protocol-aware predicate generation
+Removed hard-coded XRPL-specific logic and replaced with protocol-aware methods.
+
+
 Network topology:
 - Left partition: validators 0-4
 - Right partition: validators 2-6
@@ -26,6 +31,7 @@ import pickle
 import sys
 from multiprocessing import Pool
 from pathlib import Path
+from src.protocols.base import ConsensusProtocol
 
 # Add project root to Python path
 project_root = Path(__file__).parent.parent
@@ -35,7 +41,6 @@ from tqdm import tqdm
 
 from src.analysis.cache import generate_predicate_cache, load_predicate_cache
 from src.analysis.fault_localization import Aggregation, Report, isolate
-from src.utils.config import SET_LOW, SET_HIGH
 
 # Import stats function if needed for analysis
 try:
@@ -43,16 +48,13 @@ try:
 except ImportError:
     stats = None
 
-# Network partition definitions (validators in each partition)
-_SET_LOW = SET_LOW   # Left partition
-_SET_HIGH = SET_HIGH  # Right partition
-
 # Cache file paths for aggregation results
 AGGREGATION_CACHE_FILE = 'cache/aggregation_cache.pickle'
 REPORTS_CACHE_FILE = 'cache/reports_cache.pickle'
 
 
-def process_run_to_report(path):
+def process_run_to_report(args):
+    path, protocol = args
     """
     Process a single consensus run and convert to a Report object.
 
@@ -70,7 +72,7 @@ def process_run_to_report(path):
         or None if cache files are missing
     """
     # Load cached predicates from all 7 validator nodes
-    results = list(map(load_predicate_cache, zip(it.repeat(path), [0, 1, 2, 3, 4, 5, 6])))
+    results = list(map(load_predicate_cache, zip(it.repeat(path), range(protocol.get_num_nodes()))))
 
     # If any node is missing cache, skip this run
     if None in results:
@@ -91,17 +93,15 @@ def process_run_to_report(path):
     partition_observations = {}
     for pred, observed_nodes in aggregated.items():
         # Count how many nodes in each partition observed this predicate
+        # TODO: should use protocol.wrap_observations()
         nodes_low = len(observed_nodes.intersection(_SET_LOW))
         nodes_high = len(observed_nodes.intersection(_SET_HIGH))
 
         # Check each threshold: predicate observed in > i nodes in at least one partition
-        for threshold in range(0, 5):
-            predicate_key = f'"{pred}" > {threshold}'
-            partition_observations[predicate_key] = (nodes_low > threshold or nodes_high > threshold)
+        partition_observations.update(protocol.wrap_observations(pred, observed_nodes))
 
     # Determine if this run succeeded or failed
-    with open(os.path.join(path, "results.txt"), "r") as f:
-        successful = "reason: all committed" in f.read()
+    successful = protocol.is_successful(path)
 
     # Extract run name (timestamp) from path
     run_name = path.split("/")[-1]
@@ -161,14 +161,27 @@ class LightweightReport:
         self.successful = successful
         self.name = name
 
-def run_message_based_analysis():
+def run_message_based_analysis(protocol: ConsensusProtocol = None):
     """
     Run message-based consensus-aware analysis pipeline.
 
     Evaluates predicates on message pairs from validator logs and performs
     statistical fault localization to identify failure-correlated predicates.
     """
+    if protocol is None:
+        from src.protocols.xrpl import XRPLProtocol
+        protocol = XRPLProtocol()
+    
+    from src.analysis.cache import set_protocol
+    set_protocol(protocol)
+
+    num_nodes = protocol.get_num_nodes()
+
+    # Initialize multiprocessing pool for parallel processing
+    pool = Pool()
+
     # Discover all run directories in data folder
+    # TODO: should use protocol.get_run_directories()
     paths = []
     for dirpath, _, filenames in os.walk("data"):
         if len(filenames) == 0:
@@ -176,9 +189,6 @@ def run_message_based_analysis():
         paths.append(dirpath)
 
     paths = sorted(paths)
-
-    # Initialize multiprocessing pool for parallel processing
-    pool = Pool()
 
     reports = []
     aggregation = {}
@@ -192,7 +202,7 @@ def run_message_based_analysis():
         print("Phase 1: Generating predicate caches...")
 
         # Prepare cache generation tasks: (path, node_id) for all 7 nodes per run
-        cache_tasks = [(path, node_id) for path in paths for node_id in range(7)]
+        cache_tasks = [(path, node_id) for path in paths for node_id in range(num_nodes)]
 
         # Parallelize cache generation across all nodes and runs
         list(tqdm(
@@ -205,7 +215,7 @@ def run_message_based_analysis():
         print("\nPhase 2: Aggregating observations...")
 
         for report in tqdm(
-            pool.imap_unordered(process_run_to_report, paths),
+            pool.imap_unordered(process_run_to_report, [(path, protocol) for path in paths]),
             total=len(paths),
             desc="Generating reports"
         ):
@@ -228,10 +238,6 @@ def run_message_based_analysis():
             aggregation = pickle.load(handle)
         with open(REPORTS_CACHE_FILE, 'rb') as handle:
             reports = pickle.load(handle)
-
-    # Filter out predicates involving consensus_hash
-    # (These tend to produce less useful fault localization results)
-    aggregation = {x: y for x, y in aggregation.items() if 'consensus_hash' not in x}
 
     pool.close()
     pool.terminate()
