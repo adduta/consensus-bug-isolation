@@ -21,8 +21,14 @@ import re
 
 # Local imports
 from ..models.predicates import Assertion, Predicate
-from ..models.messages import Proposal, Validation
-from ..utils.config import FILTER_SET_LOW, FILTER_SET_HIGH
+from ..protocols.base import ConsensusProtocol
+
+_PROTOCOL = None   # Set by set_protocol() before any worker processes are spawned
+
+def set_protocol(protocol: ConsensusProtocol) -> None:
+    """Set the protocol for the cache generation."""
+    global _PROTOCOL
+    _PROTOCOL = protocol
 
 class CachedPredicate:
     """
@@ -99,7 +105,7 @@ def read_multiline_json(file):
     return json.loads(''.join(lines))
 
 
-def parse_validator_log(path):
+def parse_validator_log(path: str) -> list:
     """
     Parse a validator log file to extract consensus messages.
 
@@ -112,35 +118,27 @@ def parse_validator_log(path):
     Returns:
         List of Proposal and Validation message objects
     """
-    messages = []
-    with open(path, 'r') as f:
-        while line := f.readline():
-            line = line.strip()
-            if 'Received ProposeSet' in line:
-                messages.append(Proposal(read_multiline_json(f)))
-            if 'Received Validation' in line:
-                messages.append(Validation(read_multiline_json(f)))
-    return messages
+    return _PROTOCOL.parse_log(path)
 
 # Message field definitions for predicate generation
 # Format: (MessageType, field_name, type_category)
 # Type categories group fields that can be meaningfully compared
-fields = [
-    # Proposal fields
-    (Proposal, 'peers', set[int]),           # Set of validator IDs that sent this message
-    (Proposal, 'close_time', 'time'),        # Ledger close time
-    (Proposal, 'previous_ledger', 'hash_l'), # Hash of previous ledger
-    (Proposal, 'propose_seq', 'seq_prp'),    # Proposal sequence number
-    (Proposal, 'transaction_hash', 'hash_tx'),# Hash of transaction set
+# fields = [
+#     # Proposal fields
+#     (Proposal, 'peers', set[int]),           # Set of validator IDs that sent this message
+#     (Proposal, 'close_time', 'time'),        # Ledger close time
+#     (Proposal, 'previous_ledger', 'hash_l'), # Hash of previous ledger
+#     (Proposal, 'propose_seq', 'seq_prp'),    # Proposal sequence number
+#     (Proposal, 'transaction_hash', 'hash_tx'),# Hash of transaction set
 
-    # Validation fields
-    (Validation, 'peers', set[int]),          # Set of validator IDs that sent this message
-    (Validation, 'consensus_hash', 'hash_tx'),# Hash of agreed-upon transaction set
-    (Validation, 'flags', 'flags'),           # Validation flags (bitfield)
-    (Validation, 'ledger_hash', 'hash_l'),    # Hash of validated ledger
-    (Validation, 'ledger_sequence', 'ledger_seq'), # Ledger sequence number
-    (Validation, 'signing_time', 'time')      # Time validation was signed
-]
+#     # Validation fields
+#     (Validation, 'peers', set[int]),          # Set of validator IDs that sent this message
+#     (Validation, 'consensus_hash', 'hash_tx'),# Hash of agreed-upon transaction set
+#     (Validation, 'flags', 'flags'),           # Validation flags (bitfield)
+#     (Validation, 'ledger_hash', 'hash_l'),    # Hash of validated ledger
+#     (Validation, 'ledger_sequence', 'ledger_seq'), # Ledger sequence number
+#     (Validation, 'signing_time', 'time')      # Time validation was signed
+# ]
 
 """
 Generate all possible predicates exhaustively.
@@ -169,39 +167,46 @@ OPERATORS_BY_TYPE = {
     'time': [op.eq, op.ne],                           # Timestamps
 }
 
-# Generate predicates for each threshold level (1-4 messages)
-for threshold in range(1, 5):
-    # Generate for all message type combinations (Proposal/Validation pairs)
-    for (left_type, right_type) in itertools.product([Proposal, Validation], repeat=2):
-        # Find compatible field pairs (same type category)
-        compatible_field_pairs = []
-        left_fields = filter(lambda x: x[0] == left_type, fields)
-        right_fields = filter(lambda x: x[0] == right_type, fields)
+def build_predicates(protocol) -> tuple[list[Predicate], dict]:
+    """
+    Build the full predicate list for the given protocol.
 
-        for left_field, right_field in itertools.product(left_fields, right_fields):
-            if left_field[2] != right_field[2]:  # Skip incompatible type categories
-                continue
-            compatible_field_pairs.append((left_field, right_field))
+    Returns:
+        (predicates, predicates_by_type)
+        predicates:        flat list of all Predicate objects
+        predicates_by_type: dict keyed by (typeL, typeR) for fast lookup
+    """
+    fields = protocol.get_fields()
+    message_types = list({f[0] for f in fields})
 
-        # Generate predicates with 0-3 assertions
-        for assertion_count in range(0, 4):
-            for field_combination in itertools.combinations(compatible_field_pairs, assertion_count):
-                # For each field pair, try all valid operators
-                operators_per_field = []
-                for left_field, right_field in field_combination:
-                    operators_for_this_field = []
-                    for operator in OPERATORS_BY_TYPE[left_field[2]]:
-                        operators_for_this_field.append((left_field, operator, right_field))
-                    operators_per_field.append(operators_for_this_field)
+    predicates: list[Predicate] = []
 
-                # Generate all combinations of operator choices
-                for operator_combination in itertools.product(*operators_per_field):
-                    assertions = []
-                    for left_field, operator, right_field in operator_combination:
-                        assertions.append(Assertion(left_field[1], right_field[1], operator))
-                    predicates.append(Predicate(left_type, right_type, threshold, assertions))
+    for threshold in range(1, 5):
+        for left_type, right_type in itertools.product(message_types, repeat=2):
+            left_fields  = [f for f in fields if f[0] == left_type]
+            right_fields = [f for f in fields if f[0] == right_type]
 
-print(len(predicates), 'predicates')
+            compatible   = [
+                (lf, rf)
+                for lf, rf in itertools.product(left_fields, right_fields)
+                if lf[2] == rf[2]
+            ]
+
+            for n_assertions in range(0, 4):
+                for field_combo in itertools.combinations(compatible, n_assertions):
+                    ops_per_field = [
+                        [(lf, operator, rf) for operator in OPERATORS_BY_TYPE[lf[2]]]
+                        for lf, rf in field_combo
+                    ]
+                    for op_combo in itertools.product(*ops_per_field):
+                        assertions = [Assertion(lf[1], rf[1], o) for lf, o, rf in op_combo]
+                        predicates.append(Predicate(left_type, right_type, threshold, assertions))
+
+    predicates_by_type: dict[tuple[type, type], list[Predicate]] = {}
+    for pred in predicates:
+        predicates_by_type.setdefault((pred.typeL, pred.typeR), []).append(pred)
+
+    return predicates, predicates_by_type
 
 # Partition predicates by message type pairs for faster lookup
 # This allows us to only evaluate relevant predicates for each message pair
@@ -285,64 +290,45 @@ def generate_predicate_cache(args):
     if os.path.exists(cache_path):
         return
 
-    # Parse validator log to extract Proposals and Validations
-    messages = parse_validator_log(os.path.join(path, f'validator_{node_id}.txt'))
+    log_path = os.path.join(path, f'validator_{node_id}.txt')
+    messages = _PROTOCOL.parse_log(log_path)
+    messages = _PROTOCOL.filter_messages(messages, node_id)
 
-    # Filter messages to only include those from our network partition
-    # Validators 0-3 use left partition, validators 4-6 use right partition
-    filter_set = FILTER_SET_LOW if node_id < 4 else FILTER_SET_HIGH
-    messages = [m for m in messages if not m.peers.isdisjoint(filter_set)]
-
-    # Create lightweight state wrappers for predicates (avoids expensive deepcopy)
-    # Each type pair maintains its own list of predicate states that haven't matched yet
-    active_predicates_by_type: dict[tuple[type, type], list[PredicateState]] = {}
-    all_predicate_states = []  # Keep reference to all predicate states for final output
+    _, predicates_by_type = build_predicates(_PROTOCOL)
+    active_predicates_by_type: dict = {}
+    all_predicate_states = []
 
     for key, pred_list in predicates_by_type.items():
-        # Wrap each predicate in a lightweight state tracker (much faster than deepcopy)
-        state_wrappers = [PredicateState(pred) for pred in pred_list]
-        active_predicates_by_type[key] = state_wrappers
-        all_predicate_states.extend(state_wrappers)
+        states = [PredicateState(pred) for pred in pred_list]
+        active_predicates_by_type[key] = states
+        all_predicate_states.extend(states)
 
-    # Deduplicate messages by content, aggregating peer sets
-    # Key: message content, Value: set of peers that sent this message
-    message_deduplication_map: dict[Proposal | Validation, set] = {}
-
+    message_deduplication_map = {}
     for message in messages:
-        # If we've seen this message before, merge peer sets
+
         if message in message_deduplication_map:
             message.peers.update(message_deduplication_map[message])
 
-        # Evaluate predicates on this message paired with all previous messages
         for other_message, peers in message_deduplication_map.items():
             other_message.peers = peers
-
-            # Only evaluate predicates matching the message type pair
             type_key = (type(other_message), type(message))
+
             if type_key not in active_predicates_by_type:
                 continue
 
             active_predicates = active_predicates_by_type[type_key]
 
-            # Track which predicates to remove (those that become observed_true)
-            to_remove = []
-            for i, predicate in enumerate(active_predicates):
-                if predicate.eval(other_message, message):
-                    # Predicate matched, mark for removal from active set
-                    to_remove.append(i)
+            to_remove = [i for i, p in enumerate(active_predicates) if p.eval(other_message, message)]
 
-            # Remove matched predicates from active set (iterate backwards to maintain indices)
             for i in reversed(to_remove):
                 active_predicates.pop(i)
 
-        # Add this message to deduplication map
         message_deduplication_map.setdefault(message, set())
         message_deduplication_map[message] = message.peers
 
-    # Write results to cache file (batch into string buffer first)
-    output_lines = []
-    for pred_state in all_predicate_states:
-        output_lines.append(f'{pred_state.observed} {pred_state.observed_true} {str(pred_state)}\n')
-
+    output_lines = [
+        f'{ps.observed} {ps.observed_true} {str(ps)}\n'
+        for ps in all_predicate_states
+    ]
     with open(cache_path, 'w') as f:
         f.writelines(output_lines)
