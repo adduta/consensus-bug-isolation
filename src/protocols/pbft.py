@@ -272,3 +272,39 @@ class PBFTProtocol(ConsensusProtocol):
 
     def filter_aggregation(self, aggregation: dict) -> dict:
         return aggregation  # No post-processing needed for PBFT
+
+    def get_data_dir(self) -> str:
+        return 'out'
+
+    def get_run_paths(self) -> list[str]:
+        paths = []
+        for dirpath, _, filenames in os.walk(self.get_data_dir()):
+            for f in sorted(filenames):
+                if f.endswith('.txt') and not f.startswith('predicates-cache'):
+                    paths.append(os.path.join(dirpath, f))
+        return paths
+
+    def get_log_path(self, run_path: str, node_id: int) -> str:
+        return run_path  # Each PBFT run is a single file
+
+    def get_cache_path(self, run_path: str, node_id: int) -> str:
+        stem = run_path[:-4]  # Strip .txt
+        return f'{stem}-predicates-cache-{node_id}.txt'
+
+    def iter_run_configs(self):
+        for config in sorted(os.listdir(self.get_data_dir())):
+            config_dir = os.path.join(self.get_data_dir(), config)
+            if not os.path.isdir(config_dir):
+                continue
+            match = re.search(r'tests-D(\d)-C(\d)(?:-(.*))?$', config)
+            if match is None:
+                continue
+            d, c = match.group(1), match.group(2)
+            scope = match.group(3) or ''
+            run_paths = sorted([
+                os.path.join(config_dir, f)
+                for f in os.listdir(config_dir)
+                if f.endswith('.txt') and not f.startswith('predicates-cache')
+            ])
+            label = f'd={d} c={c} {scope}'.rstrip()
+            yield label, run_paths
