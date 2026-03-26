@@ -165,6 +165,7 @@ OPERATORS_BY_TYPE = {
     'hash_l': [op.eq, op.ne],                         # Ledger hashes
     'hash_tx': [op.eq, op.ne],                        # Transaction hashes
     'time': [op.eq, op.ne],                           # Timestamps
+    'seq':  [op.eq, op.ne, op.lt, op.gt],             # Generic sequence/integer fields (PBFT)
 }
 
 def build_predicates(protocol) -> tuple[list[Predicate], dict]:
@@ -238,7 +239,7 @@ def load_predicate_cache(args):
         List of CachedPredicate objects, or None if cache doesn't exist
     """
     path, node_id = args
-    cache_path = os.path.join(path, f'predicates-cache-{node_id}.txt')
+    cache_path = _PROTOCOL.get_cache_path(path, node_id)
 
     if not os.path.exists(cache_path):
         print(path, 'not cached')
@@ -284,13 +285,13 @@ def generate_predicate_cache(args):
         None (writes cache file as side effect)
     """
     path, node_id = args
-    cache_path = os.path.join(path, f'predicates-cache-{node_id}.txt')
+    cache_path = _PROTOCOL.get_cache_path(path, node_id)
 
     # Skip if already cached
     if os.path.exists(cache_path):
         return
 
-    log_path = os.path.join(path, f'validator_{node_id}.txt')
+    log_path = _PROTOCOL.get_log_path(path, node_id)
     messages = _PROTOCOL.parse_log(log_path)
     messages = _PROTOCOL.filter_messages(messages, node_id)
 

@@ -103,247 +103,81 @@ def new_incompatible_ledger(path):
     return len(nodes.intersection([0, 1, 2, 3, 4])) > 1 or len(nodes.intersection([2, 3, 4, 5, 6])) > 1
 
 
-def stats(filters):
+def stats(filters, protocol=None, return_agg=False):
+    if protocol is None:
+        from src.protocols.xrpl import XRPLProtocol
+        protocol = XRPLProtocol()
+
+    bug_types = protocol.get_bug_types()
+
+    # Build agg dict dynamically from protocol's bug types
+    agg = {bt: {'TP': set(), 'FP': set(), 'TN': set(), 'FN': set()} for bt in bug_types}
     all_runs = []
     filters = list(map(str, filters))
-    all_timeout = []
 
-    counter = 0
-    uncategorized_count = 0
     table = Table()
     scores = Table()
 
     table.add_column("Configuration", justify="right", style="cyan", no_wrap=True)
     table.add_column("Total", justify='right')
     table.add_column("Correct", style='green', justify='right')
-    table.add_column("Insufficient", justify='right')
-    table.add_column("Incompatible", justify='right')
-    table.add_column("Timeout", justify='right')
-    table.add_column("Incomplete", justify='right')
-    table.add_column("Uncategorized", justify='right')
-    table.add_column("II", justify='right')
-    table.add_column("UInc", justify='right')
-    table.add_column("UII", justify='right')
-    table.add_column("UIns", justify='right')
+    for bt in bug_types:
+        table.add_column(bt, justify='right')
 
     scores.add_column('Metric')
-    scores.add_column('Incompatible', justify='right')
-    scores.add_column('Insufficient', justify='right')
-    scores.add_column('Agreement', justify='right')
+    for bt in bug_types:
+        scores.add_column(bt, justify='right')
 
-    agg = {
-        'Incompatible': {
-            'TP': set(),
-            'FP': set(),
-            'TN': set(),
-            'FN': set(),
-        },
-        'Insufficient': {
-            'TP': set(),
-            'FP': set(),
-            'TN': set(),
-            'FN': set(),
-        },
-        'Agreement': {
-            'TP': set(),
-            'FP': set(),
-            'TN': set(),
-            'FN': set(),
-        },
-    }
-
-    for config in sorted(os.listdir(f'data/{version}')):
-        match = re.search(r'buggy-7-(\d)-(\d)-\d-(.*)', config)
-        if match is None:
-            continue
-        (c, d, scope) = match.groups()
-        if scope == 'any-scope':
-            scope = 'as'
-        elif scope == 'baseline':
-            scope = 'bs'
-        else:
-            scope = 'ss'
-        # print(f'd={d} c={c} {scope}|', end = '')
-        runs = os.listdir(f'data/{version}' + config)
-        print('- found', len(runs), 'runs')
+    for config_label, run_paths in protocol.iter_run_configs():
+        print(f'- found {len(run_paths)} runs')
         correct = []
-        incomplete = []
-        uncategorized = []
-        insufficient_support = []
-        insufficient_incompatible = []
-        incompatible = []
-        U_insufficient_support = []
-        U_insufficient_incompatible = []
-        U_incompatible = []
-        timeout = []
-        runs = list(filter(lambda run: run not in ['1687147966', '1687007386', '1687175769', '1687181772', '1687239494', '1687026943'], runs))[:300]
-        all_runs += runs
-        for run in runs[:cap]:
-            p = True
-            if len(filters) > 0 and run not in filters:
-                p = False
-            # if run in map(str, [1687147966, 1687142445, 1687214998, 1687175769, 1687026943]):
-            #     continue # filter timeout
-            results = open(f'data/{version}' + config + '/' + run + '/results.txt').readlines()
-            # print(results[4].strip())
-            if results[-1] != 'done!\n':
-                incomplete.append(run)
-            elif results[4] == 'reason: all committed\n':
-                correct.append(run)
-            elif results[4] == 'reason: flags\n':
-                flags = results[5:-1]
-                if count(f_not(f_timeout), flags) == 0:
-                    a = new_insufficient_support(f'data/{version}' + config + '/' + run)
-                    b = new_incompatible_ledger(f'data/{version}' + config + '/' + run)
-                    if a and b:
-                        if p:
-                            insufficient_incompatible.append(run)
-                        agg['Incompatible']['TP' if p else 'FN'].add(run)
-                        agg['Insufficient']['TP' if p else 'FN'].add(run)
-                        agg['Agreement']['FP' if p else 'TN'].add(run)
-                    elif a:
-                        if p:
-                            insufficient_support.append(run)
-                        agg['Incompatible']['FP' if p else 'TN'].add(run)
-                        agg['Insufficient']['TP' if p else 'FN'].add(run)
-                        agg['Agreement']['FP' if p else 'TN'].add(run)
-                    elif b:
-                        if p:
-                            incompatible.append(run)
-                        agg['Incompatible']['TP' if p else 'FN'].add(run)
-                        agg['Insufficient']['FP' if p else 'TN'].add(run)
-                        agg['Agreement']['FP' if p else 'TN'].add(run)
-                    else:
-                        raise Exception('timeout')
-                elif count(f_not(f_or(f_insufficient, f_timeout)), flags) == 0 and count(f_insufficient, flags) > 0:
-                    if p:
-                        insufficient_support.append(run)
-                    agg['Incompatible']['FP' if p else 'TN'].add(run)
-                    agg['Insufficient']['TP' if p else 'FN'].add(run)
-                    agg['Agreement']['FP' if p else 'TN'].add(run)
-                elif count(f_not(f_or(f_incompatible, f_timeout)), flags) == 0 and count(f_incompatible, flags) > 0:
-                    a = new_insufficient_support(f'data/{version}' + config + '/' + run)
-                    b = new_incompatible_ledger(f'data/{version}' + config + '/' + run)
-                    if a and b:
-                        if p:
-                            insufficient_incompatible.append(run)
-                        agg['Incompatible']['TP' if p else 'FN'].add(run)
-                        agg['Insufficient']['TP' if p else 'FN'].add(run)
-                        agg['Agreement']['FP' if p else 'TN'].add(run)
-                    elif a:
-                        if p:
-                            insufficient_support.append(run)
-                        agg['Incompatible']['FP' if p else 'TN'].add(run)
-                        agg['Insufficient']['TP' if p else 'FN'].add(run)
-                        agg['Agreement']['FP' if p else 'TN'].add(run)
-                    elif b:
-                        if p:
-                            incompatible.append(run)
-                        agg['Incompatible']['TP' if p else 'FN'].add(run)
-                        agg['Insufficient']['FP' if p else 'TN'].add(run)
-                        agg['Agreement']['FP' if p else 'TN'].add(run)
-                    else:
-                        raise Exception('timeout')
-                elif count(f_not(f_or(f_or(f_incompatible, f_insufficient), f_timeout)), flags) == 0 and count(f_incompatible, flags) > 0 and count(f_insufficient, flags) > 0:
-                    # insufficient_support.append(run)
-                    # incompatible.append(run)
-                    a = new_insufficient_support(f'data/{version}' + config + '/' + run)
-                    b = new_incompatible_ledger(f'data/{version}' + config + '/' + run)
-                    if a and b:
-                        if p:
-                            insufficient_incompatible.append(run)
-                        agg['Incompatible']['TP' if p else 'FN'].add(run)
-                        agg['Insufficient']['TP' if p else 'FN'].add(run)
-                        agg['Agreement']['FP' if p else 'TN'].add(run)
-                    elif a:
-                        if p:
-                            insufficient_support.append(run)
-                        agg['Incompatible']['FP' if p else 'TN'].add(run)
-                        agg['Insufficient']['TP' if p else 'FN'].add(run)
-                        agg['Agreement']['FP' if p else 'TN'].add(run)
-                    elif b:
-                        if p:
-                            incompatible.append(run)
-                        agg['Incompatible']['TP' if p else 'FN'].add(run)
-                        agg['Insufficient']['FP' if p else 'TN'].add(run)
-                        agg['Agreement']['FP' if p else 'TN'].add(run)
-                    else:
-                        raise Exception('timeout')
-                    counter += 1
+        bug_counts = {bt: [] for bt in bug_types}
+        run_paths_capped = run_paths[:cap]
+        all_runs += run_paths_capped
+        for run_path in run_paths_capped:
+            run_id = os.path.basename(run_path.rstrip('/'))
+            p = len(filters) == 0 or run_id in filters
+
+            actual_bugs = protocol.classify_run(run_path)
+
+            if not actual_bugs:
+                correct.append(run_id)
+
+            for bt in bug_types:
+                if bt in actual_bugs:
+                    agg[bt]['TP' if p else 'FN'].add(run_id)
+                    bug_counts[bt].append(run_id)
                 else:
-                    a = new_insufficient_support(f'data/{version}' + config + '/' + run)
-                    b = new_incompatible_ledger(f'data/{version}' + config + '/' + run)
-                    if a and b:
-                        if p:
-                            U_insufficient_incompatible.append(run)
-                        agg['Incompatible']['TP' if p else 'FN'].add(run)
-                        agg['Insufficient']['TP' if p else 'FN'].add(run)
-                        agg['Agreement']['TP' if p else 'FN'].add(run)
-                    elif a:
-                        if p:
-                            U_insufficient_support.append(run)
-                        agg['Incompatible']['FP' if p else 'TN'].add(run)
-                        agg['Insufficient']['TP' if p else 'FN'].add(run)
-                        agg['Agreement']['TP' if p else 'FN'].add(run)
-                    elif b:
-                        if p:
-                            U_incompatible.append(run)
-                        agg['Incompatible']['TP' if p else 'FN'].add(run)
-                        agg['Insufficient']['FP' if p else 'TN'].add(run)
-                        agg['Agreement']['TP' if p else 'FN'].add(run)
-                    else:
-                        if p:
-                            uncategorized.append(run)
-                        agg['Incompatible']['FP' if p else 'TN'].add(run)
-                        agg['Insufficient']['FP' if p else 'TN'].add(run)
-                        agg['Agreement']['TP' if p else 'FN'].add(run)
-                        if p:
-                            uncategorized_count += 1
-            else:
-                raise Exception("unknown")
-        # print(f'{len(runs[:cap]):5d}', end = '|')
-        # print(f'{len(correct):7d}', end = '|')
-        # print(f'{len(insufficient_support):12d}', end = '|')
-        # print(f'{len(incompatible):12d}', end = '|')
-        # print(f'{len(timeout):7d}', end = '|')
-        # print(f'{len(incomplete):10d}', end = '|')
-        # print(f'{len(uncategorized):13d}', uncategorized)
+                    agg[bt]['FP' if p else 'TN'].add(run_id)
 
-        table.add_row(f'd={d} c={c} {scope}', str(len(runs[:cap])), str(len(correct)), str(len(insufficient_support)), str(len(incompatible)), str(len(timeout)), str(len(incomplete)), str(len(uncategorized)), str(len(insufficient_incompatible)), str(len(U_incompatible)), str(len(U_insufficient_incompatible)), str(len(U_insufficient_support)))
-
-    # print('multiple bugs', counter)
-
-    # print(uncategorized_count, 'uncategorized')
-    if len(sys.argv) == 3 and sys.argv[1] == 'list' and sys.argv[2] == 'timeouts':
-        print('timeouts:', all_timeout)
-
-    # print('\n\n')
+        table.add_row(config_label, str(len(run_paths_capped)), str(len(correct)),
+                       *[str(len(bug_counts[bt])) for bt in bug_types])
 
     console = Console()
     console.print(table)
 
-    sensitivity = lambda l: len(agg[l]['TP']) / (len(agg[l]['TP']) + len(agg[l]['FN'])) # recall
-    specifity = lambda l: len(agg[l]['TN']) / (len(agg[l]['TN']) + len(agg[l]['FP']))
-    precision = lambda l: len(agg[l]['TP']) / (len(agg[l]['TP']) + len(agg[l]['FP']))
+    def safe_div(a, b):
+        return a / b if b > 0 else 0.0
+
+    sensitivity = lambda l: safe_div(len(agg[l]['TP']), len(agg[l]['TP']) + len(agg[l]['FN']))
+    specifity = lambda l: safe_div(len(agg[l]['TN']), len(agg[l]['TN']) + len(agg[l]['FP']))
+    precision = lambda l: safe_div(len(agg[l]['TP']), len(agg[l]['TP']) + len(agg[l]['FP']))
     f1 = lambda l: 0 if precision(l) + sensitivity(l) == 0 else 2 * (precision(l) * sensitivity(l)) / (precision(l) + sensitivity(l))
     f0_5 = lambda l: 0 if precision(l) + sensitivity(l) == 0 else 1.25 * (precision(l) * sensitivity(l)) / (0.25 * precision(l) + sensitivity(l))
+    accuracy = lambda l: safe_div(len(agg[l]['TP']) + len(agg[l]['TN']),
+                                  len(agg[l]['TP']) + len(agg[l]['TN']) + len(agg[l]['FP']) + len(agg[l]['FN']))
 
-    a_incompatible = (len(agg['Incompatible']['TP']) + len(agg['Incompatible']['TN'])) / (len(agg['Incompatible']['TP']) + len(agg['Incompatible']['TN']) + len(agg['Incompatible']['FP']) + len(agg['Incompatible']['FN']))
-    p_incompatible = len(agg['Incompatible']['TP']) / (len(agg['Incompatible']['TP']) + len(agg['Incompatible']['FP']))
-    a_insufficient = (len(agg['Insufficient']['TP']) + len(agg['Insufficient']['TN'])) / (len(agg['Insufficient']['TP']) + len(agg['Insufficient']['TN']) + len(agg['Insufficient']['FP']) + len(agg['Insufficient']['FN']))
-    p_insufficient = len(agg['Insufficient']['TP']) / (len(agg['Insufficient']['TP']) + len(agg['Insufficient']['FP']))
-    a_agreement = (len(agg['Agreement']['TP']) + len(agg['Agreement']['TN'])) / (len(agg['Agreement']['TP']) + len(agg['Agreement']['TN']) + len(agg['Agreement']['FP']) + len(agg['Agreement']['FN']))
-    p_agreement = len(agg['Agreement']['TP']) / (len(agg['Agreement']['TP']) + len(agg['Agreement']['FP']))
-    scores.add_row('Precision', '{:.1%}'.format(p_incompatible), '{:.1%}'.format(p_insufficient), '{:.1%}'.format(p_agreement))
-    scores.add_row('Recall', '{:.1%}'.format(sensitivity('Incompatible')), '{:.1%}'.format(sensitivity('Insufficient')), '{:.1%}'.format(sensitivity('Agreement')))
-    scores.add_row('F1', '{:.1%}'.format(f1('Incompatible')), '{:.1%}'.format(f1('Insufficient')), '{:.1%}'.format(f1('Agreement')))
-    scores.add_row('F0.5', '{:.1%}'.format(f0_5('Incompatible')), '{:.1%}'.format(f0_5('Insufficient')), '{:.1%}'.format(f0_5('Agreement')))
-    scores.add_row('Specifity', '{:.1%}'.format(specifity('Incompatible')), '{:.1%}'.format(specifity('Insufficient')), '{:.1%}'.format(specifity('Agreement')))
-    scores.add_row('Accuracy', '{:.1%}'.format(a_incompatible), '{:.1%}'.format(a_insufficient), '{:.1%}'.format(a_agreement))
-
-    # print(list(map(int, all_runs)))
+    scores.add_row('Precision', *['{:.1%}'.format(precision(bt)) for bt in bug_types])
+    scores.add_row('Recall', *['{:.1%}'.format(sensitivity(bt)) for bt in bug_types])
+    scores.add_row('F1', *['{:.1%}'.format(f1(bt)) for bt in bug_types])
+    scores.add_row('F0.5', *['{:.1%}'.format(f0_5(bt)) for bt in bug_types])
+    scores.add_row('Specifity', *['{:.1%}'.format(specifity(bt)) for bt in bug_types])
+    scores.add_row('Accuracy', *['{:.1%}'.format(accuracy(bt)) for bt in bug_types])
 
     console.print(scores)
+
+    if return_agg:
+        return agg
 
 if __name__ == '__main__':
     stats([])

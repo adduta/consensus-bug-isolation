@@ -26,7 +26,7 @@ from src.analysis.fault_localization import isolate, Report
 from scripts.analyze import stats
 
 
-def run_baseline_analysis():
+def run_baseline_analysis(protocol=None):
     """
     Run baseline PRED-based analysis pipeline.
 
@@ -85,7 +85,7 @@ def run_baseline_analysis():
     # Perform statistical fault localization using shared algorithm
     print(f"\nProcessed {len(reports)} runs from validator logs with PRED annotations")
     print("Starting statistical fault localization...\n")
-    isolate(reports, stats_fn=stats)
+    isolate(reports, stats_fn=lambda filters: stats(filters, protocol=protocol))
 
 
 if __name__ == '__main__':

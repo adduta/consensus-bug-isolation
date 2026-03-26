@@ -1,3 +1,5 @@
+import os
+import re
 from abc import ABC, abstractmethod
 
 class ConsensusProtocol(ABC):
@@ -95,3 +97,40 @@ class ConsensusProtocol(ABC):
         Example: XRPLProtocol removes predicates involving 'consensus_hash'.
         """
         return aggregation
+
+    def get_data_dir(self) -> str:
+        """Root directory containing all run data."""
+        return 'data'
+
+    def get_run_paths(self) -> list[str]:
+        """Discover all run paths from get_data_dir(). Default: XRPL-style directory-per-run."""
+        paths = []
+        for dirpath, _, filenames in os.walk(self.get_data_dir()):
+            if filenames:
+                paths.append(dirpath)
+        return sorted(paths)
+
+    def get_log_path(self, run_path: str, node_id: int) -> str:
+        """Return path to the log file for a given run and node."""
+        return os.path.join(run_path, f'validator_{node_id}.txt')
+
+    def get_cache_path(self, run_path: str, node_id: int) -> str:
+        """Return path to the predicate cache file for a given run and node."""
+        return os.path.join(run_path, f'predicates-cache-{node_id}.txt')
+
+    def iter_run_configs(self):
+        """
+        Yield (config_label, run_paths) pairs, grouped by configuration.
+
+        Used by stats() to iterate over runs while building the distribution table.
+        Default: yields one group per top-level subdirectory in get_data_dir().
+        """
+        for config in sorted(os.listdir(self.get_data_dir())):
+            config_dir = os.path.join(self.get_data_dir(), config)
+            if not os.path.isdir(config_dir):
+                continue
+            run_paths = sorted([
+                os.path.join(config_dir, r)
+                for r in os.listdir(config_dir)
+            ])
+            yield config, run_paths

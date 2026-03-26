@@ -73,6 +73,31 @@ class XRPLProtocol(ConsensusProtocol):
             for t in range(0, 5)
         }
 
+    _EXCLUDED_RUNS = frozenset({
+        '1687147966', '1687007386', '1687175769',
+        '1687181772', '1687239494', '1687026943',
+    })
+
+    def iter_run_configs(self):
+        for config in sorted(os.listdir(self.get_data_dir())):
+            match = re.search(r'buggy-7-(\d)-(\d)-\d-(.*)', config)
+            if match is None:
+                continue
+            c, d, scope = match.groups()
+            if scope == 'any-scope':
+                scope = 'as'
+            elif scope == 'baseline':
+                scope = 'bs'
+            else:
+                scope = 'ss'
+            config_dir = os.path.join(self.get_data_dir(), config)
+            runs = [
+                r for r in os.listdir(config_dir)
+                if r not in self._EXCLUDED_RUNS
+            ][:300]
+            run_paths = [os.path.join(config_dir, r) for r in runs]
+            yield f'd={d} c={c} {scope}', run_paths
+
 # --- Ground-truth oracles (moved from analyze.py) ---
 def _new_insufficient_support(path: str) -> bool:
     hashes: dict[str, dict[int, str]] = {}

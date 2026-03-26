@@ -94,8 +94,8 @@ def process_run_to_report(args):
     for pred, observed_nodes in aggregated.items():
         # Count how many nodes in each partition observed this predicate
         # TODO: should use protocol.wrap_observations()
-        nodes_low = len(observed_nodes.intersection(_SET_LOW))
-        nodes_high = len(observed_nodes.intersection(_SET_HIGH))
+        # nodes_low = len(observed_nodes.intersection(_SET_LOW))
+        # nodes_high = len(observed_nodes.intersection(_SET_HIGH))
 
         # Check each threshold: predicate observed in > i nodes in at least one partition
         partition_observations.update(protocol.wrap_observations(pred, observed_nodes))
@@ -177,18 +177,11 @@ def run_message_based_analysis(protocol: ConsensusProtocol = None):
 
     num_nodes = protocol.get_num_nodes()
 
-    # Initialize multiprocessing pool for parallel processing
-    pool = Pool()
+    # Initialize multiprocessing pool; initializer propagates _PROTOCOL to workers
+    pool = Pool(initializer=set_protocol, initargs=(protocol,))
 
-    # Discover all run directories in data folder
-    # TODO: should use protocol.get_run_directories()
-    paths = []
-    for dirpath, _, filenames in os.walk("data"):
-        if len(filenames) == 0:
-            continue
-        paths.append(dirpath)
-
-    paths = sorted(paths)
+    # Discover all run paths via protocol (handles protocol-specific data directory)
+    paths = protocol.get_run_paths()
 
     reports = []
     aggregation = {}
@@ -244,7 +237,7 @@ def run_message_based_analysis(protocol: ConsensusProtocol = None):
 
     # Phase 3: Perform statistical fault localization
     print("\nPhase 3: Isolating failure-causing predicates...")
-    isolate(reports, aggregations=aggregation, stats_fn=stats)
+    isolate(reports, aggregations=aggregation, stats_fn=lambda filters: stats(filters, protocol=protocol))
 
 
 if __name__ == '__main__':
