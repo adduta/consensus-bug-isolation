@@ -73,6 +73,11 @@ class XRPLProtocol(ConsensusProtocol):
             for t in range(0, 5)
         }
 
+    def filter_aggregation(self, aggregation: dict) -> dict:
+        # Match the original paper's pipeline: drop every predicate that
+        # asserts on consensus_hash before running the recursive isolation.
+        return {k: v for k, v in aggregation.items() if 'consensus_hash' not in k}
+
     _EXCLUDED_RUNS = frozenset({
         '1687147966', '1687007386', '1687175769',
         '1687181772', '1687239494', '1687026943',
@@ -133,11 +138,6 @@ def _new_incompatible_ledger(path: str) -> bool:
         len(nodes.intersection({0, 1, 2, 3, 4})) > 1 or
         len(nodes.intersection({2, 3, 4, 5, 6})) > 1
     )
-
-# Filter out predicates involving consensus_hash
-# (These tend to produce less useful fault localization results)
-def filter_aggregation(aggregation: dict) -> dict:
-    return {x: y for x, y in aggregation.items() if 'consensus_hash' not in x}
 
 def get_run_directories(path: str) -> list[str]:
     return [os.path.join(path, d) for d in os.listdir(path) if os.path.isdir(os.path.join(path, d))]

@@ -110,3 +110,11 @@ All Groups A and B are enabled by the same implementation flaw: **the empty dige
 Group C is enabled by the same flaw in the view-change path: prepared-proofs embedded in VIEW-CHANGE messages are not verified against a content hash, so corrupted proofs are accepted.
 
 Groups D and E are purely network-level faults and do not depend on the digest vulnerability.
+
+---
+
+## Edge Cases
+
+### COMMIT mutation causing timeout (D0-C2, out191)
+
+Two runs (`tests-D0-C2-as/out191.txt` and `tests-D0-C2-ss/out191.txt`) fail with a timeout caused by a COMMIT field mutation in a zero-partition configuration. The `as` variant has a wildly corrupted `view-number` (−1949330706); the `ss` variant has a small-scope mutation. In both cases the corrupted COMMIT disrupts the commit phase, preventing progress. These do not fit any of Groups A–E: there is no PRE-PREPARE operation/seq mutation, no VIEW-CHANGE/NEW-VIEW corruption, and no network partition. They are currently classified as "Partition Timeout" by `classify_run` as a fallback, which is inaccurate since no partition exists.

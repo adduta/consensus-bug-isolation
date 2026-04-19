@@ -39,7 +39,7 @@ sys.path.insert(0, str(project_root))
 
 from tqdm import tqdm
 
-from src.analysis.cache import generate_predicate_cache, load_predicate_cache
+from src.analysis.cache import generate_predicate_cache, load_predicate_cache, set_protocol
 from src.analysis.fault_localization import Aggregation, Report, isolate
 
 # Import stats function if needed for analysis
@@ -48,9 +48,15 @@ try:
 except ImportError:
     stats = None
 
-# Cache file paths for aggregation results
-AGGREGATION_CACHE_FILE = 'cache/aggregation_cache.pickle'
-REPORTS_CACHE_FILE = 'cache/reports_cache.pickle'
+def _cache_paths_for(protocol):
+    """Derive unique cache paths per protocol/scope so distinct runs don't clobber each other."""
+    name = type(protocol).__name__.lower().replace('protocol', '')
+    scope = getattr(protocol, 'scope', None)
+    suffix = f'_{scope}' if scope else ''
+    return (
+        f'cache/aggregation_cache_{name}{suffix}.pickle',
+        f'cache/reports_cache_{name}{suffix}.pickle',
+    )
 
 
 def process_run_to_report(args):
@@ -71,7 +77,7 @@ def process_run_to_report(args):
         Report object with success status and predicate observations,
         or None if cache files are missing
     """
-    # Load cached predicates from all 7 validator nodes
+    # Load cached predicates from all validator nodes
     results = list(map(load_predicate_cache, zip(it.repeat(path), range(protocol.get_num_nodes()))))
 
     # If any node is missing cache, skip this run
@@ -103,8 +109,8 @@ def process_run_to_report(args):
     # Determine if this run succeeded or failed
     successful = protocol.is_successful(path)
 
-    # Extract run name (timestamp) from path
-    run_name = path.split("/")[-1]
+    # Extract run name from path (normalize Windows backslashes)
+    run_name = path.replace("\\", "/")
 
     return Report(successful, partition_observations, run_name)
 
@@ -161,6 +167,7 @@ class LightweightReport:
         self.successful = successful
         self.name = name
 
+
 def run_message_based_analysis(protocol: ConsensusProtocol = None):
     """
     Run message-based consensus-aware analysis pipeline.
@@ -171,7 +178,7 @@ def run_message_based_analysis(protocol: ConsensusProtocol = None):
     if protocol is None:
         from src.protocols.xrpl import XRPLProtocol
         protocol = XRPLProtocol()
-    
+
     from src.analysis.cache import set_protocol
     set_protocol(protocol)
 
@@ -186,15 +193,25 @@ def run_message_based_analysis(protocol: ConsensusProtocol = None):
     reports = []
     aggregation = {}
 
-    # Control whether to regenerate cache or load from pickle
-    # Set to False to load cached aggregation (much faster)
-    REGENERATE_CACHE = True
+    aggregation_cache_file, reports_cache_file = _cache_paths_for(protocol)
 
-    if REGENERATE_CACHE:
-        # Phase 1: Generate predicate caches for all runs
+    # Control whether to regenerate cache or load from pickle
+    # Set to False to load cached aggregation (much faster on re-runs)
+    REGENERATE_CACHE = False
+
+    if not REGENERATE_CACHE and os.path.exists(aggregation_cache_file) and os.path.exists(reports_cache_file):
+        # Load pre-computed aggregation from pickle cache (much faster on re-runs)
+        print("Loading cached aggregation...")
+        with open(aggregation_cache_file, 'rb') as handle:
+            aggregation = pickle.load(handle)
+        with open(reports_cache_file, 'rb') as handle:
+            reports = pickle.load(handle)
+
+    else:
+        # Phase 1: Generate predicate cache files for all runs
         print("Phase 1: Generating predicate caches...")
 
-        # Prepare cache generation tasks: (path, node_id) for all 7 nodes per run
+        # Prepare cache generation tasks: (path, node_id) for all nodes per run
         cache_tasks = [(path, node_id) for path in paths for node_id in range(num_nodes)]
 
         # Parallelize cache generation across all nodes and runs
@@ -219,21 +236,18 @@ def run_message_based_analysis(protocol: ConsensusProtocol = None):
                 aggregate_predicate_observations([report], aggregation)
 
         # Save aggregation to disk for fast re-loading
-        os.makedirs(os.path.dirname(AGGREGATION_CACHE_FILE), exist_ok=True)
-        with open(AGGREGATION_CACHE_FILE, 'wb') as handle:
+        os.makedirs(os.path.dirname(aggregation_cache_file), exist_ok=True)
+        with open(aggregation_cache_file, 'wb') as handle:
             pickle.dump(aggregation, handle, protocol=pickle.HIGHEST_PROTOCOL)
-        with open(REPORTS_CACHE_FILE, 'wb') as handle:
+        with open(reports_cache_file, 'wb') as handle:
             pickle.dump(reports, handle, protocol=pickle.HIGHEST_PROTOCOL)
-    else:
-        # Load pre-computed aggregation from cache
-        print("Loading cached aggregation...")
-        with open(AGGREGATION_CACHE_FILE, 'rb') as handle:
-            aggregation = pickle.load(handle)
-        with open(REPORTS_CACHE_FILE, 'rb') as handle:
-            reports = pickle.load(handle)
 
     pool.close()
     pool.terminate()
+
+    # Apply protocol-specific aggregation filter (e.g. XRPL drops consensus_hash
+    # predicates to match the original paper's pipeline).
+    aggregation = protocol.filter_aggregation(aggregation)
 
     # Phase 3: Perform statistical fault localization
     print("\nPhase 3: Isolating failure-causing predicates...")

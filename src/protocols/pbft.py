@@ -103,12 +103,38 @@ class ViewChange:
 _SENT_RE    = re.compile(r'^Sent:\s+(\d+)\s+->\s+\S+\s+(\{.+\})\s+##\d+')
 _MUTATED_RE = re.compile(r'^\s+-\s+Mutated:\s+\d+\s+->\s+\d+(\{.+\})\s+#\d+')
 _VIOLATION_RE = re.compile(r'Violation of (\w+) at Replica:\s*(\d+).*viewNo:\s*(\d+).*seqNo:\s*(\d+)')
+_DROPPED_RE = re.compile(r'^\s+-\s+Dropped:', re.MULTILINE)
+
+class NewView:
+    __slots__ = ['new_view_no', 'num_vc_proofs', 'num_prepared_proofs', 'replica_id', 'peers']
+
+    def __init__(self, sender: int, msg: dict) -> None:
+        self.new_view_no         = msg.get('new-view-number', 0)
+        self.num_vc_proofs       = len(msg.get('view-change-proofs', []))
+        self.num_prepared_proofs = len(msg.get('prepared-proofs', []))
+        self.replica_id          = sender
+        self.peers               = {sender}
+
+    def __eq__(self, o):
+        return isinstance(o, NewView) and (
+            self.new_view_no == o.new_view_no and
+            self.num_vc_proofs == o.num_vc_proofs and
+            self.num_prepared_proofs == o.num_prepared_proofs and
+            self.replica_id == o.replica_id
+        )
+
+    def __hash__(self):
+        return hash((self.new_view_no, self.num_vc_proofs, self.num_prepared_proofs, self.replica_id))
+
+    def __str__(self):
+        return f'NewView(new_v={self.new_view_no}, vc={self.num_vc_proofs}, prep={self.num_prepared_proofs})'
 
 _TYPE_CLASSES = {
     'PRE-PREPARE': PrePrepare,
     'PREPARE':     Prepare,
     'COMMIT':      Commit,
     'VIEW-CHANGE': ViewChange,
+    'NEW-VIEW':    NewView,
 }
 
 def _parse_messages_from_log(text: str) -> list:
@@ -172,25 +198,39 @@ def _parse_violations_from_log(text: str) -> list[dict]:
 class PBFTProtocol(ConsensusProtocol):
     """PBFT consensus protocol adapter (ByzzFuzz test format)."""
 
+    def __init__(self, scope: str | None = None):
+        # scope: None = all configs, 'ss' = only -ss configs, 'as' = only -as configs
+        self.scope = scope
+
+    def _config_matches_scope(self, config: str) -> bool:
+        if self.scope is None:
+            return True
+        if self.scope == 'ss':
+            return config.endswith('-ss')
+        if self.scope == 'as':
+            return config.endswith('-as')
+        return True
+
     def get_fields(self) -> list[tuple[type, str, str]]:
         return [
-            # PRE-PREPARE — Group A (operation mutation) and Group B (seq mutation)
-            (PrePrepare, 'view_no',          'seq'),
-            (PrePrepare, 'seq_no',           'seq'),
-            (PrePrepare, 'operation_first',  'seq'),
-            (PrePrepare, 'operation_second', 'seq'),
-            (PrePrepare, 'timestamp',        'time'),
-            # PREPARE / COMMIT — Group D (quorum) and Group E (cross-view)
-            (Prepare,    'view_no',          'seq'),
-            (Prepare,    'seq_no',           'seq'),
-            (Prepare,    'replica_id',       'seq'),
-            (Commit,     'view_no',          'seq'),
-            (Commit,     'seq_no',           'seq'),
-            (Commit,     'replica_id',       'seq'),
-            # VIEW-CHANGE — Group C
-            (ViewChange, 'new_view_no',      'seq'),
-            (ViewChange, 'last_seq_no',      'seq'),
-            (ViewChange, 'replica_id',       'seq'),
+            (PrePrepare, 'view_no',             'view_current'),
+            (PrePrepare, 'seq_no',              'seqno'),
+            (PrePrepare, 'operation_first',     'op_first'),
+            (PrePrepare, 'operation_second',    'op_second'),
+            (PrePrepare, 'timestamp',           'time'),
+            (Prepare,    'view_no',             'view_current'),
+            (Prepare,    'seq_no',              'seqno'),
+            (Prepare,    'replica_id',          'rid'),
+            (Commit,     'view_no',             'view_current'),
+            (Commit,     'seq_no',              'seqno'),
+            (Commit,     'replica_id',          'rid'),
+            (ViewChange, 'new_view_no',         'view_next'),
+            (ViewChange, 'last_seq_no',         'seqno'),
+            (ViewChange, 'replica_id',          'rid'),
+            (NewView,    'new_view_no',         'view_next'),
+            (NewView,    'num_vc_proofs',       'vc_proof_count'),
+            (NewView,    'num_prepared_proofs', 'prep_proof_count'),
+            (NewView,    'replica_id',          'rid'),
         ]
 
     def parse_log(self, path: str) -> list:
@@ -210,11 +250,16 @@ class PBFTProtocol(ConsensusProtocol):
             text = f.read()
         return 'Violation of' not in text and 'Reached test duration' not in text
 
+    _CONFIG_RE = re.compile(r'tests-D(\d+)-C(\d+)')
+
+    def _config_has_partition(self, run_path: str) -> bool:
+        m = self._CONFIG_RE.search(run_path.replace('\\', '/'))
+        return bool(m and int(m.group(1)) > 0)
+
     def classify_run(self, run_path: str) -> set[str]:
         with open(run_path, 'r') as f:
             text = f.read()
 
-        # Successful run: no violations and no timeout
         if 'Violation of' not in text and 'Reached test duration' not in text:
             return set()
 
@@ -222,49 +267,60 @@ class PBFTProtocol(ConsensusProtocol):
         mutations  = _parse_mutations_from_log(text)
         groups     = set()
 
-        if not violations:
-            # Termination-only failure (timeout with no safety violation)
-            vc_mutated = any(m.get('type') in ('VIEW-CHANGE', 'NEW-VIEW') for m in mutations)
-            groups.add('View-Change Fault' if vc_mutated else 'Partition Timeout')
-            return groups
+        partition = self._config_has_partition(run_path)
 
-        if not mutations:
-            # Pure network fault with safety violations → Split Brain or Partition Timeout
-            high_view = any(v['view_no'] >= 2 for v in violations)
-            if high_view and any(v['type'] == 'AGREEMENT' for v in violations):
-                groups.add('Split Brain')
-            else:
-                groups.add('Partition Timeout')
-            return groups
+        preprepare_ms   = [m for m in mutations if m.get('type') == 'PRE-PREPARE']
+        vc_nv_mutated   = any(m.get('type') in ('VIEW-CHANGE', 'NEW-VIEW') for m in mutations)
+        commit_mutated  = any(m.get('type') == 'COMMIT' for m in mutations)
 
-        # Mutations + violations present
-        # View-Change Fault (C): VIEW-CHANGE or NEW-VIEW was mutated
-        vc_mutated = any(m.get('type') in ('VIEW-CHANGE', 'NEW-VIEW') for m in mutations)
-        if vc_mutated:
-            groups.add('View-Change Fault')
+        has_validity_or_agreement = any(v['type'] in ('VALIDITY', 'AGREEMENT') for v in violations)
+        has_termination = 'Reached test duration' in text or any(v['type'] == 'TERMINATION' for v in violations)
+        agreement_at_high_view = any(v['type'] == 'AGREEMENT' and v['view_no'] >= 2 for v in violations)
 
-        for m in mutations:
-            if m.get('type') != 'PRE-PREPARE':
-                continue
-            ts  = m.get('timestamp')
-            seq = m.get('seq-number')
+        # Group A — Invalid Operation: PRE-PREPARE operation mutation at the correct slot.
+        # Require `operation` in the mutated payload in BOTH branches (was previously only
+        # enforced in the violations+mutations branch); accept either a VALIDITY/AGREEMENT
+        # violation OR a no-partition timeout as evidence the mutation caused the failure.
+        for m in preprepare_ms:
+            ts, seq = m.get('timestamp'), m.get('seq-number')
             if ts is None or seq is None:
                 continue
-            if ts < seq:
-                # Seq-No Replay (B): old request replayed at a higher slot
-                groups.add('Seq-No Replay')
-            elif ts == seq and 'operation' in m:
-                # Invalid Operation (A): operation field mutated at the correct slot
-                if any(v['type'] in ('VALIDITY', 'AGREEMENT') for v in violations):
+            if ts == seq and 'operation' in m:
+                if has_validity_or_agreement or (not partition and not violations):
                     groups.add('Invalid Operation')
+            # Group B — Seq-No Replay: old request replayed at a higher slot.
+            # Now detected in all branches, not only when a violation was observed.
+            elif ts < seq:
+                groups.add('Seq-No Replay')
 
+        # Group C — View-Change Fault: VC/NV mutation that plausibly caused the failure.
+        # Only attribute VCF when there is causal evidence (timeout or AGREEMENT at view>=1);
+        # previously attributed whenever VC/NV was mutated, over-labeling partition-induced
+        # failures that happened to contain a benign VC mutation.
+        if vc_nv_mutated and (has_termination or any(v['type'] == 'AGREEMENT' and v['view_no'] >= 1 for v in violations)):
+            groups.add('View-Change Fault')
+
+        # Group E — Split Brain: AGREEMENT violation at view_no >= 2 (multi-view partition).
+        # Threshold tightened from >=1 to >=2 to match root-cause doc; now reachable in the
+        # violations+mutations branch as well (previously only when mutations were absent).
+        if agreement_at_high_view:
+            groups.add('Split Brain')
+
+        # Commit Corruption: COMMIT mutation causing timeout without partition and without
+        # any other explanatory mutation — covers the D0-C2 out191 edge case the root-cause
+        # doc explicitly flagged as mis-classified as Partition Timeout.
+        if commit_mutated and not partition and not violations and not vc_nv_mutated and not preprepare_ms:
+            groups.add('Commit Corruption')
+
+        # Group D — Partition Timeout: partition present, timeout outcome, no specific fault.
+        # Preserved as a fallback so every failing run carries at least one label.
         if not groups:
-            groups.add('Partition Timeout')  # Non-critical mutations + partition → timeout
+            groups.add('Partition Timeout')
 
         return groups
 
     def get_bug_types(self) -> list[str]:
-        return ['Invalid Operation', 'Seq-No Replay', 'View-Change Fault', 'Partition Timeout', 'Split Brain']
+        return ['Invalid Operation', 'Seq-No Replay', 'View-Change Fault', 'Partition Timeout', 'Split Brain', 'Commit Corruption']
 
     def wrap_observations(self, pred: str, observed_nodes: set) -> dict[str, bool]:
         # PBFT: single threshold (observed by at least one replica)
@@ -278,10 +334,16 @@ class PBFTProtocol(ConsensusProtocol):
 
     def get_run_paths(self) -> list[str]:
         paths = []
-        for dirpath, _, filenames in os.walk(self.get_data_dir()):
-            for f in sorted(filenames):
-                if f.endswith('.txt') and not f.startswith('predicates-cache'):
-                    paths.append(os.path.join(dirpath, f))
+        data_dir = self.get_data_dir()
+        for config in sorted(os.listdir(data_dir)):
+            config_dir = os.path.join(data_dir, config)
+            if not os.path.isdir(config_dir):
+                continue
+            if not self._config_matches_scope(config):
+                continue
+            for f in sorted(os.listdir(config_dir)):
+                if f.endswith('.txt') and '-predicates-cache-' not in f:
+                    paths.append(os.path.join(config_dir, f))
         return paths
 
     def get_log_path(self, run_path: str, node_id: int) -> str:
@@ -296,6 +358,8 @@ class PBFTProtocol(ConsensusProtocol):
             config_dir = os.path.join(self.get_data_dir(), config)
             if not os.path.isdir(config_dir):
                 continue
+            if not self._config_matches_scope(config):
+                continue
             match = re.search(r'tests-D(\d)-C(\d)(?:-(.*))?$', config)
             if match is None:
                 continue
@@ -304,7 +368,7 @@ class PBFTProtocol(ConsensusProtocol):
             run_paths = sorted([
                 os.path.join(config_dir, f)
                 for f in os.listdir(config_dir)
-                if f.endswith('.txt') and not f.startswith('predicates-cache')
+                if f.endswith('.txt') and '-predicates-cache-' not in f
             ])
             label = f'd={d} c={c} {scope}'.rstrip()
             yield label, run_paths

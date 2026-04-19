@@ -135,7 +135,7 @@ def stats(filters, protocol=None, return_agg=False):
         run_paths_capped = run_paths[:cap]
         all_runs += run_paths_capped
         for run_path in run_paths_capped:
-            run_id = os.path.basename(run_path.rstrip('/'))
+            run_id = run_path.replace("\\", "/")
             p = len(filters) == 0 or run_id in filters
 
             actual_bugs = protocol.classify_run(run_path)

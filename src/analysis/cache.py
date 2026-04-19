@@ -165,7 +165,18 @@ OPERATORS_BY_TYPE = {
     'hash_l': [op.eq, op.ne],                         # Ledger hashes
     'hash_tx': [op.eq, op.ne],                        # Transaction hashes
     'time': [op.eq, op.ne],                           # Timestamps
-    'seq':  [op.eq, op.ne, op.lt, op.gt],             # Generic sequence/integer fields (PBFT)
+    'seq':        [op.eq, op.ne, op.lt, op.gt],        # Generic sequence/integer fields (PBFT legacy)
+    'view':       [op.eq, op.ne, op.lt, op.gt],
+    'view_current': [op.eq, op.ne, op.lt, op.gt],
+    'view_next':    [op.eq, op.ne, op.lt, op.gt],
+    'seqno':      [op.eq, op.ne, op.lt, op.gt],
+    'rid':        [op.eq, op.ne],
+    'op':         [op.eq, op.ne],
+    'op_first':   [op.eq, op.ne],
+    'op_second':  [op.eq, op.ne],
+    'proof_count':[op.eq, op.ne, op.lt, op.gt],
+    'vc_proof_count':   [op.eq, op.ne, op.lt, op.gt],
+    'prep_proof_count': [op.eq, op.ne, op.lt, op.gt],
 }
 
 def build_predicates(protocol) -> tuple[list[Predicate], dict]:
