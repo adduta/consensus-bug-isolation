@@ -190,11 +190,14 @@ def build_predicates(protocol) -> tuple[list[Predicate], dict]:
     """
     fields = protocol.get_fields()
     message_types = list({f[0] for f in fields})
+    excluded = getattr(protocol, 'get_excluded_type_pairs', lambda: set())()
 
     predicates: list[Predicate] = []
 
     for threshold in range(1, 5):
         for left_type, right_type in itertools.product(message_types, repeat=2):
+            if (left_type, right_type) in excluded:
+                continue
             left_fields  = [f for f in fields if f[0] == left_type]
             right_fields = [f for f in fields if f[0] == right_type]
 

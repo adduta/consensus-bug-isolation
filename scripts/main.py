@@ -31,11 +31,12 @@ import pickle
 import sys
 from multiprocessing import Pool
 from pathlib import Path
-from src.protocols.base import ConsensusProtocol
 
 # Add project root to Python path
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
+
+from src.protocols.base import ConsensusProtocol
 
 from tqdm import tqdm
 

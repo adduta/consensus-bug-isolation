@@ -98,12 +98,49 @@ class ViewChange:
     def __str__(self):
         return f'ViewChange(new_v={self.new_view_no}, last_s={self.last_seq_no})'
 
+# ---- Replica-level commit (parsed from LOG-Replica-Commit lines) ----
+
+class ReplicaCommit:
+    """Represents a committed operation as logged by a replica."""
+    __slots__ = ['view_no', 'seq_no', 'replica_id',
+                 'operation_first', 'operation_second', 'timestamp', 'peers']
+
+    def __init__(self, replica_id: int, view_no: int, seq_no: int,
+                 op_first: int, op_second: int, timestamp: int) -> None:
+        self.view_no          = view_no
+        self.seq_no           = seq_no
+        self.replica_id       = replica_id
+        self.operation_first  = op_first
+        self.operation_second = op_second
+        self.timestamp        = timestamp
+        self.peers            = {replica_id}
+
+    def __eq__(self, o):
+        return isinstance(o, ReplicaCommit) and (
+            self.view_no == o.view_no and self.seq_no == o.seq_no and
+            self.replica_id == o.replica_id and
+            self.operation_first == o.operation_first and
+            self.operation_second == o.operation_second
+        )
+
+    def __hash__(self):
+        return hash((self.view_no, self.seq_no, self.replica_id,
+                      self.operation_first, self.operation_second))
+
+    def __str__(self):
+        return (f'ReplicaCommit(v={self.view_no}, s={self.seq_no}, r={self.replica_id}, '
+                f'op=({self.operation_first},{self.operation_second}))')
+
 # ---- Parsing helpers ----
 
-_SENT_RE    = re.compile(r'^Sent:\s+(\d+)\s+->\s+\S+\s+(\{.+\})\s+##\d+')
+_SENT_RE    = re.compile(r'^Sent:\s+(\d+)\s+->\s+(\d+)\s+(\{.+\})\s+##\d+')
+_DROPPED_RE = re.compile(r'^\s+-\s+Dropped:\s+(\d+)\s+->\s+(\d+)')
 _MUTATED_RE = re.compile(r'^\s+-\s+Mutated:\s+\d+\s+->\s+\d+(\{.+\})\s+#\d+')
 _VIOLATION_RE = re.compile(r'Violation of (\w+) at Replica:\s*(\d+).*viewNo:\s*(\d+).*seqNo:\s*(\d+)')
-_DROPPED_RE = re.compile(r'^\s+-\s+Dropped:', re.MULTILINE)
+_REPLICA_COMMIT_RE = re.compile(
+    r'^LOG-Replica-Commit:(\d+)\s+viewNo:\s*(\d+)\s+seqNo:\s*(\d+)\s+'
+    r'request:.*operation=AddOp\{first=(\d+),\s*second=(\d+)\},\s*timestamp=(\d+)'
+)
 
 class NewView:
     __slots__ = ['new_view_no', 'num_vc_proofs', 'num_prepared_proofs', 'replica_id', 'peers']
@@ -137,30 +174,59 @@ _TYPE_CLASSES = {
     'NEW-VIEW':    NewView,
 }
 
-def _parse_messages_from_log(text: str) -> list:
-    """Extract all Sent: messages from a PBFT execution log."""
-    messages = []
-    for line in text.splitlines():
+def _parse_inboxes_from_log(text: str) -> dict[int, list]:
+    """Parse a PBFT log into per-replica inboxes.
+
+    Returns a dict mapping replica_id -> list of messages that replica received.
+    Dropped deliveries are excluded.  LOG-Replica-Commit entries are placed into
+    the committing replica's inbox only.
+    """
+    # Collect line indices of Dropped deliveries
+    lines = text.splitlines()
+    dropped_lines: set[int] = set()
+    for i, line in enumerate(lines):
+        if _DROPPED_RE.match(line):
+            dropped_lines.add(i)
+
+    # Parse Sent lines and assign to receiver inboxes (skipping dropped deliveries)
+    inboxes: dict[int, list] = {}
+    for i, line in enumerate(lines):
         m = _SENT_RE.match(line)
-        if not m:
+        if m:
+            sender_str, receiver_str, json_str = m.groups()
+            sender = int(sender_str)
+            receiver = int(receiver_str)
+
+            # Check if this delivery was dropped (Dropped line immediately follows)
+            if i + 1 in dropped_lines:
+                dm = _DROPPED_RE.match(lines[i + 1])
+                if dm and int(dm.group(1)) == sender and int(dm.group(2)) == receiver:
+                    continue  # Skip dropped delivery
+
+            try:
+                msg = json.loads(json_str)
+            except json.JSONDecodeError:
+                continue
+
+            msg_type = msg.get('type', '')
+            cls = _TYPE_CLASSES.get(msg_type)
+            if not cls:
+                continue
+
+            inboxes.setdefault(receiver, []).append(cls(sender, msg))
             continue
 
-        sender_str, json_str = m.groups()
-        sender = int(sender_str)
-        try:
-            msg = json.loads(json_str)
-        except json.JSONDecodeError:
-            print(f"Failed to parse JSON: {json_str}")
-            continue
-        
-        msg_type = msg.get('type', '')
-        cls = _TYPE_CLASSES.get(msg_type)
-        if not cls:
-            print(f"Unknown message type: {msg_type}")
-            continue
+        # LOG-Replica-Commit goes into the committing replica's inbox
+        m = _REPLICA_COMMIT_RE.match(line)
+        if m:
+            replica_id = int(m.group(1))
+            view_no, seq_no = int(m.group(2)), int(m.group(3))
+            op_first, op_second, timestamp = int(m.group(4)), int(m.group(5)), int(m.group(6))
+            inboxes.setdefault(replica_id, []).append(
+                ReplicaCommit(replica_id, view_no, seq_no, op_first, op_second, timestamp)
+            )
 
-        messages.append(cls(sender, msg))
-    return messages
+    return inboxes
 
 def _parse_mutations_from_log(text: str) -> list[dict]:
     """Extract all mutated messages from a PBFT execution log."""
@@ -198,9 +264,13 @@ def _parse_violations_from_log(text: str) -> list[dict]:
 class PBFTProtocol(ConsensusProtocol):
     """PBFT consensus protocol adapter (ByzzFuzz test format)."""
 
+    NUM_REPLICAS = 4
+
     def __init__(self, scope: str | None = None):
         # scope: None = all configs, 'ss' = only -ss configs, 'as' = only -as configs
         self.scope = scope
+        self._cached_path: str | None = None
+        self._cached_inboxes: dict[int, list] | None = None
 
     def _config_matches_scope(self, config: str) -> bool:
         if self.scope is None:
@@ -210,6 +280,14 @@ class PBFTProtocol(ConsensusProtocol):
         if self.scope == 'as':
             return config.endswith('-as')
         return True
+
+    def get_excluded_type_pairs(self) -> set[tuple[type, type]]:
+        """Type pairs to exclude from predicate generation.
+
+        Excluded:
+        - ReplicaCommit→ReplicaCommit: self-comparisons add noise
+        """
+        return {(ReplicaCommit, ReplicaCommit)}
 
     def get_fields(self) -> list[tuple[type, str, str]]:
         return [
@@ -231,19 +309,38 @@ class PBFTProtocol(ConsensusProtocol):
             (NewView,    'num_vc_proofs',       'vc_proof_count'),
             (NewView,    'num_prepared_proofs', 'prep_proof_count'),
             (NewView,    'replica_id',          'rid'),
+            (ReplicaCommit, 'view_no',          'view_current'),
+            (ReplicaCommit, 'seq_no',           'seqno'),
+            (ReplicaCommit, 'replica_id',       'rid'),
+            (ReplicaCommit, 'operation_first',  'op_first'),
+            (ReplicaCommit, 'operation_second', 'op_second'),
+            (ReplicaCommit, 'timestamp',        'time'),
         ]
 
+    def _ensure_inboxes(self, path: str) -> None:
+        """Parse and cache per-replica inboxes for the given log file."""
+        if self._cached_path != path:
+            with open(path, 'r') as f:
+                text = f.read()
+            self._cached_inboxes = _parse_inboxes_from_log(text)
+            self._cached_path = path
+
     def parse_log(self, path: str) -> list:
-        with open(path, 'r') as f:
-            text = f.read()
-        return _parse_messages_from_log(text)
+        self._ensure_inboxes(path)
+        # Flat list for backward compat (used by classify_run helpers)
+        all_msgs = []
+        for msgs in self._cached_inboxes.values():
+            all_msgs.extend(msgs)
+        return all_msgs
 
     def get_num_nodes(self) -> int:
-        # Each PBFT run produces a single execution log; we treat it as 1 "node file"
-        return 1
-    
+        return self.NUM_REPLICAS
+
     def filter_messages(self, messages: list, node_id: int) -> list:
-        return messages  # No partition filtering for PBFT
+        """Return the inbox for a specific replica."""
+        if self._cached_inboxes is None:
+            return messages
+        return self._cached_inboxes.get(node_id, [])
 
     def is_successful(self, run_path: str) -> bool:
         with open(run_path, 'r') as f:
@@ -323,8 +420,9 @@ class PBFTProtocol(ConsensusProtocol):
         return ['Invalid Operation', 'Seq-No Replay', 'View-Change Fault', 'Partition Timeout', 'Split Brain', 'Commit Corruption']
 
     def wrap_observations(self, pred: str, observed_nodes: set) -> dict[str, bool]:
-        # PBFT: single threshold (observed by at least one replica)
-        return {f'"{pred}" > 0': len(observed_nodes) > 0}
+        # Tolerance dimension: predicate true for the run if observed by > i replicas
+        n = len(observed_nodes)
+        return {f'"{pred}" > {i}': n > i for i in range(self.NUM_REPLICAS)}
 
     def filter_aggregation(self, aggregation: dict) -> dict:
         return aggregation  # No post-processing needed for PBFT
