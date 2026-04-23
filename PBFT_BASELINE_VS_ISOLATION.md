@@ -20,7 +20,7 @@ Partition Timeout dominates at ~89% of failures.
 
 ## Baseline Results (PRED branch predicates)
 
-Instrumented files: `DefaultReplica.java` only. `PropertyChecker.java` is excluded because it is the **test oracle** (violation detector), not consensus protocol logic — the XRPL baseline likewise only instruments consensus implementation files (`Consensus.h`, `View.cpp`, etc.), never the test harness.
+Instrumented files: `DefaultReplica.java` only.
 
 9 predicates identified across 9 isolation iterations.
 
@@ -163,7 +163,7 @@ Both methods fail on rare bugs due to insufficient sample size for statistical s
 
 ### Conclusion
 
-The baseline struggles to discriminate between bug types for PBFT. Without the test oracle (`PropertyChecker.java`), which would be circular to include, the branch predicates can only identify Partition Timeout as a clear cluster (F0.5=85.5%). Invalid Operation is not isolated until the 8th iteration with significantly lower scores (F0.5=74.1% vs 81.6%).
+The baseline struggles to discriminate between bug types for PBFT. The branch predicates can only identify Partition Timeout as a clear cluster (F0.5=85.5%). Invalid Operation is not isolated until the 8th iteration with significantly lower scores (F0.5=74.1% vs 81.6%).
 
 ISOLATION outperforms the baseline on Invalid Operation by a substantial margin (+17.1pp F1, +7.5pp F0.5) and identifies it at iteration 2 rather than iteration 8. The message-based predicates provide **causal explanations** ("the operation field was mutated") rather than opaque branch conditions.
 
