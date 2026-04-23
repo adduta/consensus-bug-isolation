@@ -45,12 +45,11 @@ class Prepare:
 
     def __eq__(self, o):
         return isinstance(o, Prepare) and (
-            self.view_no == o.view_no and self.seq_no == o.seq_no and
-            self.replica_id == o.replica_id
+            self.view_no == o.view_no and self.seq_no == o.seq_no
         )
 
     def __hash__(self):
-        return hash((self.view_no, self.seq_no, self.replica_id))
+        return hash((self.view_no, self.seq_no))
 
     def __str__(self):
         return f'Prepare(v={self.view_no}, s={self.seq_no}, r={self.replica_id})'
@@ -67,12 +66,11 @@ class Commit:
 
     def __eq__(self, o):
         return isinstance(o, Commit) and (
-            self.view_no == o.view_no and self.seq_no == o.seq_no and
-            self.replica_id == o.replica_id
+            self.view_no == o.view_no and self.seq_no == o.seq_no
         )
 
     def __hash__(self):
-        return hash((self.view_no, self.seq_no, self.replica_id))
+        return hash((self.view_no, self.seq_no))
 
     def __str__(self):
         return f'Commit(v={self.view_no}, s={self.seq_no}, r={self.replica_id})'
@@ -88,12 +86,11 @@ class ViewChange:
 
     def __eq__(self, o):
         return isinstance(o, ViewChange) and (
-            self.new_view_no == o.new_view_no and self.last_seq_no == o.last_seq_no and
-            self.replica_id == o.replica_id
+            self.new_view_no == o.new_view_no and self.last_seq_no == o.last_seq_no
         )
 
     def __hash__(self):
-        return hash((self.new_view_no, self.last_seq_no, self.replica_id))
+        return hash((self.new_view_no, self.last_seq_no))
 
     def __str__(self):
         return f'ViewChange(new_v={self.new_view_no}, last_s={self.last_seq_no})'
@@ -118,13 +115,12 @@ class ReplicaCommit:
     def __eq__(self, o):
         return isinstance(o, ReplicaCommit) and (
             self.view_no == o.view_no and self.seq_no == o.seq_no and
-            self.replica_id == o.replica_id and
             self.operation_first == o.operation_first and
             self.operation_second == o.operation_second
         )
 
     def __hash__(self):
-        return hash((self.view_no, self.seq_no, self.replica_id,
+        return hash((self.view_no, self.seq_no,
                       self.operation_first, self.operation_second))
 
     def __str__(self):
@@ -156,12 +152,11 @@ class NewView:
         return isinstance(o, NewView) and (
             self.new_view_no == o.new_view_no and
             self.num_vc_proofs == o.num_vc_proofs and
-            self.num_prepared_proofs == o.num_prepared_proofs and
-            self.replica_id == o.replica_id
+            self.num_prepared_proofs == o.num_prepared_proofs
         )
 
     def __hash__(self):
-        return hash((self.new_view_no, self.num_vc_proofs, self.num_prepared_proofs, self.replica_id))
+        return hash((self.new_view_no, self.num_vc_proofs, self.num_prepared_proofs))
 
     def __str__(self):
         return f'NewView(new_v={self.new_view_no}, vc={self.num_vc_proofs}, prep={self.num_prepared_proofs})'
@@ -296,25 +291,26 @@ class PBFTProtocol(ConsensusProtocol):
             (PrePrepare, 'operation_first',     'op_first'),
             (PrePrepare, 'operation_second',    'op_second'),
             (PrePrepare, 'timestamp',           'time'),
+            (PrePrepare, 'peers',               set[int]),
             (Prepare,    'view_no',             'view_current'),
             (Prepare,    'seq_no',              'seqno'),
-            (Prepare,    'replica_id',          'rid'),
+            (Prepare,    'peers',               set[int]),
             (Commit,     'view_no',             'view_current'),
             (Commit,     'seq_no',              'seqno'),
-            (Commit,     'replica_id',          'rid'),
+            (Commit,     'peers',               set[int]),
             (ViewChange, 'new_view_no',         'view_next'),
             (ViewChange, 'last_seq_no',         'seqno'),
-            (ViewChange, 'replica_id',          'rid'),
+            (ViewChange, 'peers',               set[int]),
             (NewView,    'new_view_no',         'view_next'),
             (NewView,    'num_vc_proofs',       'vc_proof_count'),
             (NewView,    'num_prepared_proofs', 'prep_proof_count'),
-            (NewView,    'replica_id',          'rid'),
+            (NewView,    'peers',               set[int]),
             (ReplicaCommit, 'view_no',          'view_current'),
             (ReplicaCommit, 'seq_no',           'seqno'),
-            (ReplicaCommit, 'replica_id',       'rid'),
             (ReplicaCommit, 'operation_first',  'op_first'),
             (ReplicaCommit, 'operation_second', 'op_second'),
             (ReplicaCommit, 'timestamp',        'time'),
+            (ReplicaCommit, 'peers',            set[int]),
         ]
 
     def _ensure_inboxes(self, path: str) -> None:
@@ -467,6 +463,81 @@ class PBFTProtocol(ConsensusProtocol):
                 os.path.join(config_dir, f)
                 for f in os.listdir(config_dir)
                 if f.endswith('.txt') and '-predicates-cache-' not in f
+            ])
+            label = f'd={d} c={c} {scope}'.rstrip()
+            yield label, run_paths
+
+    # ---- Baseline (PRED-annotation) methods ----
+
+    def parse_baseline_observations(self, run_path: str) -> tuple[bool, dict[str, bool], str] | None:
+        with open(run_path, 'r') as f:
+            text = f.read()
+
+        correct = 'Violation of' not in text and 'Reached test duration' not in text
+
+        observations: dict[str, bool] = {}
+
+        for line in text.splitlines():
+            if not line.startswith('PRED '):
+                continue
+
+            parts = line.strip().split()
+            if len(parts) < 5:
+                continue
+
+            pred_id = parts[1] + ' ' + parts[2]
+            observation = parts[4] == '1'
+
+            key_true = pred_id + ' is true'
+            key_false = pred_id + ' is false'
+
+            if key_true not in observations:
+                observations[key_true] = observation
+                observations[key_false] = not observation
+            else:
+                observations[key_true] = observation or observations[key_true]
+                observations[key_false] = (not observation) or observations[key_false]
+
+        run_name = run_path.replace("\\", "/")
+        return (correct, observations, run_name)
+
+    def get_baseline_data_dir(self) -> str:
+        """Data directory containing PBFT logs with PRED annotations."""
+        return 'out copy'
+
+    def get_baseline_run_paths(self) -> list[str]:
+        """Run paths from the 'out copy' directory containing PRED-instrumented logs."""
+        data_dir = self.get_baseline_data_dir()
+        paths = []
+        for config in sorted(os.listdir(data_dir)):
+            config_dir = os.path.join(data_dir, config)
+            if not os.path.isdir(config_dir):
+                continue
+            if not self._config_matches_scope(config):
+                continue
+            for f in sorted(os.listdir(config_dir)):
+                if f.endswith('.txt'):
+                    paths.append(os.path.join(config_dir, f))
+        return paths
+
+    def iter_baseline_run_configs(self):
+        """Yield (config_label, run_paths) pairs from the baseline data directory."""
+        data_dir = self.get_baseline_data_dir()
+        for config in sorted(os.listdir(data_dir)):
+            config_dir = os.path.join(data_dir, config)
+            if not os.path.isdir(config_dir):
+                continue
+            if not self._config_matches_scope(config):
+                continue
+            match = re.search(r'tests-D(\d)-C(\d)(?:-(.*))?$', config)
+            if match is None:
+                continue
+            d, c = match.group(1), match.group(2)
+            scope = match.group(3) or ''
+            run_paths = sorted([
+                os.path.join(config_dir, f)
+                for f in os.listdir(config_dir)
+                if f.endswith('.txt')
             ])
             label = f'd={d} c={c} {scope}'.rstrip()
             yield label, run_paths
