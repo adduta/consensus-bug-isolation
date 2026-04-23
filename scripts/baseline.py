@@ -3,8 +3,8 @@
 Baseline PRED-based Analysis Pipeline
 
 This module implements the baseline approach that reads predicate observations
-directly from PRED annotations in validator logs (as opposed to the message-based
-approach that evaluates predicates on consensus messages).
+directly from PRED annotations in validator/replica logs (as opposed to the
+message-based approach that evaluates predicates on message pairs).
 
 Both approaches are equal, first-class approaches for consensus bug isolation:
 - Baseline (this file): Uses pre-annotated PRED observations
@@ -30,62 +30,33 @@ def run_baseline_analysis(protocol=None):
     """
     Run baseline PRED-based analysis pipeline.
 
-    Reads PRED annotations from validator logs and performs statistical
+    Reads PRED annotations from logs and performs statistical
     fault localization to identify failure-correlated predicates.
+
+    Works for any protocol that implements parse_baseline_observations().
     """
+    if protocol is None:
+        from src.protocols.xrpl import XRPLProtocol
+        protocol = XRPLProtocol()
+
     reports = []
 
-    # Walk through all data directories and process validator logs
-    for (dirpath, _, filenames) in os.walk('data'):
-        if (len(filenames) == 0):
+    # Use protocol-specific baseline run discovery
+    run_paths = protocol.get_baseline_run_paths()
+
+    for run_path in run_paths:
+        result = protocol.parse_baseline_observations(run_path)
+        if result is None:
             continue
-        print(dirpath)
-
-        # Determine if this run succeeded or failed
-        with open(os.path.join(dirpath, 'results.txt'), 'r') as f:
-            correct = 'reason: all committed' in f.read()
-
-        all_observations = []
-        observations = {}
-
-        # Read PRED annotations from all 7 validator logs
-        for i in range(0, 7):
-            with open(os.path.join(dirpath, f'validator_{i}.txt'), 'r') as f:
-                for line in f.readlines():
-                    # Look for lines starting with PRED
-                    if not line.startswith('PRED'):
-                        continue
-
-                    # Parse PRED line format: "PRED <predicate> <0|1>"
-                    line = line.strip()[5:]  # Remove "PRED " prefix
-                    id = " ".join(line.split(" ")[:-1])  # Extract predicate ID
-
-                    # Skip malformed PRED lines
-                    if 'PRED' in id:
-                        continue
-
-                    # Parse observation value (1 = true, 0 = false)
-                    observation = line.split(" ")[-1] == "1"
-
-                    # Track both "is true" and "is false" observations
-                    if id not in observations:
-                        observations[id + ' is true'] = observation
-                        observations[id + ' is false'] = not observation
-                    else:
-                        # Aggregate observations across nodes (OR logic)
-                        observations[id + ' is true'] = observation or observations[id + ' is true']
-                        observations[id + ' is false'] = (not observation) or observations[id + ' is false']
-
-            all_observations.append(observations)
-
-        # Create report for this run
-        run_name = dirpath.split('/')[-1]
+        correct, observations, run_name = result
         reports.append(Report(correct, observations, run_name))
 
     # Perform statistical fault localization using shared algorithm
-    print(f"\nProcessed {len(reports)} runs from validator logs with PRED annotations")
+    print(f"\nProcessed {len(reports)} runs with PRED annotations")
     print("Starting statistical fault localization...\n")
-    isolate(reports, stats_fn=lambda filters: stats(filters, protocol=protocol))
+    isolate(reports, stats_fn=lambda filters: stats(
+        filters, protocol=protocol, use_baseline_configs=True
+    ))
 
 
 if __name__ == '__main__':

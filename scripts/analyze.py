@@ -103,7 +103,7 @@ def new_incompatible_ledger(path):
     return len(nodes.intersection([0, 1, 2, 3, 4])) > 1 or len(nodes.intersection([2, 3, 4, 5, 6])) > 1
 
 
-def stats(filters, protocol=None, return_agg=False):
+def stats(filters, protocol=None, return_agg=False, use_baseline_configs=False):
     if protocol is None:
         from src.protocols.xrpl import XRPLProtocol
         protocol = XRPLProtocol()
@@ -128,7 +128,8 @@ def stats(filters, protocol=None, return_agg=False):
     for bt in bug_types:
         scores.add_column(bt, justify='right')
 
-    for config_label, run_paths in protocol.iter_run_configs():
+    config_iter = protocol.iter_baseline_run_configs() if use_baseline_configs else protocol.iter_run_configs()
+    for config_label, run_paths in config_iter:
         print(f'- found {len(run_paths)} runs')
         correct = []
         bug_counts = {bt: [] for bt in bug_types}
