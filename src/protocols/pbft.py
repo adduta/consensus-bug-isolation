@@ -131,11 +131,11 @@ class ReplicaCommit:
 
 _SENT_RE    = re.compile(r'^Sent:\s+(\d+)\s+->\s+(\d+)\s+(\{.+\})\s+##\d+')
 _DROPPED_RE = re.compile(r'^\s+-\s+Dropped:\s+(\d+)\s+->\s+(\d+)')
-_MUTATED_RE = re.compile(r'^\s+-\s+Mutated:\s+\d+\s+->\s+\d+(\{.+\})\s+#\d+')
+_MUTATED_RE = re.compile(r'^\s+-\s+Mutated:\s+(\d+)\s+->\s+(\d+)(\{.+\})\s+#\d+')
 _VIOLATION_RE = re.compile(r'Violation of (\w+) at Replica:\s*(\d+).*viewNo:\s*(\d+).*seqNo:\s*(\d+)')
 _REPLICA_COMMIT_RE = re.compile(
     r'^LOG-Replica-Commit:(\d+)\s+viewNo:\s*(\d+)\s+seqNo:\s*(\d+)\s+'
-    r'request:.*operation=AddOp\{first=(\d+),\s*second=(\d+)\},\s*timestamp=(\d+)'
+    r'request:.*operation=AddOp\{first=(-?\d+),\s*second=(-?\d+)\},\s*timestamp=(-?\d+)'
 )
 
 class NewView:
@@ -176,12 +176,16 @@ def _parse_inboxes_from_log(text: str) -> dict[int, list]:
     Dropped deliveries are excluded.  LOG-Replica-Commit entries are placed into
     the committing replica's inbox only.
     """
-    # Collect line indices of Dropped deliveries
+    # Collect line indices of Dropped and Mutated deliveries
     lines = text.splitlines()
     dropped_lines: set[int] = set()
+    mutated_lines: dict[int, re.Match] = {}
     for i, line in enumerate(lines):
         if _DROPPED_RE.match(line):
             dropped_lines.add(i)
+        mm = _MUTATED_RE.match(line)
+        if mm:
+            mutated_lines[i] = mm
 
     # Parse Sent lines and assign to receiver inboxes (skipping dropped deliveries)
     inboxes: dict[int, list] = {}
@@ -197,6 +201,13 @@ def _parse_inboxes_from_log(text: str) -> dict[int, list]:
                 dm = _DROPPED_RE.match(lines[i + 1])
                 if dm and int(dm.group(1)) == sender and int(dm.group(2)) == receiver:
                     continue  # Skip dropped delivery
+
+            # If a Mutated line follows for the same sender->receiver,
+            # use the mutated message content (what was actually delivered)
+            if i + 1 in mutated_lines:
+                mm = mutated_lines[i + 1]
+                if int(mm.group(1)) == sender and int(mm.group(2)) == receiver:
+                    json_str = mm.group(3)
 
             try:
                 msg = json.loads(json_str)
@@ -233,9 +244,9 @@ def _parse_mutations_from_log(text: str) -> list[dict]:
             continue
         # The mutated JSON may be incomplete in the log; try best-effort parse
         try:
-            msg = json.loads(m.group(1))
+            msg = json.loads(m.group(3))
         except json.JSONDecodeError:
-            print(f"Failed to parse JSON: {m.group(1)}")
+            print(f"Failed to parse JSON: {m.group(3)}")
             continue
         mutations.append(msg)
     return mutations
@@ -261,9 +272,10 @@ class PBFTProtocol(ConsensusProtocol):
 
     NUM_REPLICAS = 4
 
-    def __init__(self, scope: str | None = None):
+    def __init__(self, scope: str | None = None, data_dir: str | None = None):
         # scope: None = all configs, 'ss' = only -ss configs, 'as' = only -as configs
         self.scope = scope
+        self._data_dir = data_dir
         self._cached_path: str | None = None
         self._cached_inboxes: dict[int, list] | None = None
 
@@ -341,7 +353,15 @@ class PBFTProtocol(ConsensusProtocol):
     def is_successful(self, run_path: str) -> bool:
         with open(run_path, 'r') as f:
             text = f.read()
-        return 'Violation of' not in text and 'Reached test duration' not in text
+        if 'Violation of' in text:
+            return False
+        # A run that reached the test duration but then completed successfully
+        # (after delivering pending messages) is NOT a failure.
+        if 'Timer for Request Timeout' in text:
+            return False
+        if 'Reached test duration' in text and 'Task completed' not in text:
+            return False
+        return True
 
     _CONFIG_RE = re.compile(r'tests-D(\d+)-C(\d+)')
 
@@ -353,7 +373,13 @@ class PBFTProtocol(ConsensusProtocol):
         with open(run_path, 'r') as f:
             text = f.read()
 
-        if 'Violation of' not in text and 'Reached test duration' not in text:
+        has_violation = 'Violation of' in text
+        has_timer_timeout = 'Timer for Request Timeout' in text
+        has_reached_no_complete = ('Reached test duration' in text
+                                  and 'Task completed' not in text)
+        is_failing = has_violation or has_timer_timeout or has_reached_no_complete
+
+        if not is_failing:
             return set()
 
         violations = _parse_violations_from_log(text)
@@ -365,14 +391,14 @@ class PBFTProtocol(ConsensusProtocol):
         preprepare_ms   = [m for m in mutations if m.get('type') == 'PRE-PREPARE']
         vc_nv_mutated   = any(m.get('type') in ('VIEW-CHANGE', 'NEW-VIEW') for m in mutations)
         commit_mutated  = any(m.get('type') == 'COMMIT' for m in mutations)
+        prepare_mutated = any(m.get('type') == 'PREPARE' for m in mutations)
 
         has_validity_or_agreement = any(v['type'] in ('VALIDITY', 'AGREEMENT') for v in violations)
-        has_termination = 'Reached test duration' in text or any(v['type'] == 'TERMINATION' for v in violations)
+        has_termination = has_timer_timeout or has_reached_no_complete
         agreement_at_high_view = any(v['type'] == 'AGREEMENT' and v['view_no'] >= 2 for v in violations)
 
         # Group A — Invalid Operation: PRE-PREPARE operation mutation at the correct slot.
-        # Require `operation` in the mutated payload in BOTH branches (was previously only
-        # enforced in the violations+mutations branch); accept either a VALIDITY/AGREEMENT
+        # Require `operation` in the mutated payload; accept either a VALIDITY/AGREEMENT
         # violation OR a no-partition timeout as evidence the mutation caused the failure.
         for m in preprepare_ms:
             ts, seq = m.get('timestamp'), m.get('seq-number')
@@ -382,38 +408,33 @@ class PBFTProtocol(ConsensusProtocol):
                 if has_validity_or_agreement or (not partition and not violations):
                     groups.add('Invalid Operation')
             # Group B — Seq-No Replay: old request replayed at a higher slot.
-            # Now detected in all branches, not only when a violation was observed.
             elif ts < seq:
                 groups.add('Seq-No Replay')
 
         # Group C — View-Change Fault: VC/NV mutation that plausibly caused the failure.
-        # Only attribute VCF when there is causal evidence (timeout or AGREEMENT at view>=1);
-        # previously attributed whenever VC/NV was mutated, over-labeling partition-induced
-        # failures that happened to contain a benign VC mutation.
+        # Only attribute VCF when there is causal evidence (timeout or AGREEMENT at view>=1).
         if vc_nv_mutated and (has_termination or any(v['type'] == 'AGREEMENT' and v['view_no'] >= 1 for v in violations)):
             groups.add('View-Change Fault')
 
         # Group E — Split Brain: AGREEMENT violation at view_no >= 2 (multi-view partition).
-        # Threshold tightened from >=1 to >=2 to match root-cause doc; now reachable in the
-        # violations+mutations branch as well (previously only when mutations were absent).
         if agreement_at_high_view:
             groups.add('Split Brain')
 
-        # Commit Corruption: COMMIT mutation causing timeout without partition and without
-        # any other explanatory mutation — covers the D0-C2 out191 edge case the root-cause
-        # doc explicitly flagged as mis-classified as Partition Timeout.
-        if commit_mutated and not partition and not violations and not vc_nv_mutated and not preprepare_ms:
-            groups.add('Commit Corruption')
+        # Group F — Non-PP Mutation: COMMIT or PREPARE mutation causing timeout without
+        # any PRE-PREPARE or VC/NV mutation being the primary cause. These mutations
+        # disrupt the commit phase or prepare counting, stalling the protocol.
+        if ((commit_mutated or prepare_mutated) and not violations
+                and not vc_nv_mutated and not preprepare_ms and has_termination):
+            groups.add('Non-PP Mutation')
 
-        # Group D — Partition Timeout: partition present, timeout outcome, no specific fault.
-        # Preserved as a fallback so every failing run carries at least one label.
+        # Group D — Partition Timeout: fallback when no specific fault explains the failure.
         if not groups:
             groups.add('Partition Timeout')
 
         return groups
 
     def get_bug_types(self) -> list[str]:
-        return ['Invalid Operation', 'Seq-No Replay', 'View-Change Fault', 'Partition Timeout', 'Split Brain', 'Commit Corruption']
+        return ['Invalid Operation', 'Seq-No Replay', 'View-Change Fault', 'Partition Timeout', 'Split Brain', 'Non-PP Mutation']
 
     def wrap_observations(self, pred: str, observed_nodes: set) -> dict[str, bool]:
         # Tolerance dimension: predicate true for the run if observed by > i replicas
@@ -424,7 +445,7 @@ class PBFTProtocol(ConsensusProtocol):
         return aggregation  # No post-processing needed for PBFT
 
     def get_data_dir(self) -> str:
-        return 'out'
+        return self._data_dir or 'out'
 
     def get_run_paths(self) -> list[str]:
         paths = []
@@ -473,7 +494,11 @@ class PBFTProtocol(ConsensusProtocol):
         with open(run_path, 'r') as f:
             text = f.read()
 
-        correct = 'Violation of' not in text and 'Reached test duration' not in text
+        has_violation = 'Violation of' in text
+        has_timer_timeout = 'Timer for Request Timeout' in text
+        has_reached_no_complete = ('Reached test duration' in text
+                                  and 'Task completed' not in text)
+        correct = not has_violation and not has_timer_timeout and not has_reached_no_complete
 
         observations: dict[str, bool] = {}
 
@@ -522,7 +547,7 @@ class PBFTProtocol(ConsensusProtocol):
             if not self._config_matches_scope(config):
                 continue
             for f in sorted(os.listdir(config_dir)):
-                if f.endswith('.txt'):
+                if f.endswith('.txt') and '-predicates-cache-' not in f:
                     paths.append(os.path.join(config_dir, f))
         return paths
 
@@ -543,7 +568,7 @@ class PBFTProtocol(ConsensusProtocol):
             run_paths = sorted([
                 os.path.join(config_dir, f)
                 for f in os.listdir(config_dir)
-                if f.endswith('.txt')
+                if f.endswith('.txt') and '-predicates-cache-' not in f
             ])
             label = f'd={d} c={c} {scope}'.rstrip()
             yield label, run_paths

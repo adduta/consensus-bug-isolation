@@ -198,7 +198,7 @@ def run_message_based_analysis(protocol: ConsensusProtocol = None):
 
     # Control whether to regenerate cache or load from pickle
     # Set to False to load cached aggregation (much faster on re-runs)
-    REGENERATE_CACHE = False
+    REGENERATE_CACHE = True
 
     if not REGENERATE_CACHE and os.path.exists(aggregation_cache_file) and os.path.exists(reports_cache_file):
         # Load pre-computed aggregation from pickle cache (much faster on re-runs)
@@ -221,6 +221,13 @@ def run_message_based_analysis(protocol: ConsensusProtocol = None):
             total=len(cache_tasks),
             desc="Generating cache"
         ))
+
+        # Close Phase 1 pool — worker processes accumulate state from
+        # generate_predicate_cache that causes load_predicate_cache to
+        # silently fail for some runs when the same pool is reused.
+        pool.close()
+        pool.join()
+        pool = Pool(initializer=set_protocol, initargs=(protocol,))
 
         # Phase 2: Load caches and aggregate observations
         print("\nPhase 2: Aggregating observations...")
