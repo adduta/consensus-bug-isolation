@@ -486,6 +486,12 @@ class PBFTProtocol(ConsensusProtocol):
                 continue
 
             pred_id = parts[1] + ' ' + parts[2]
+
+            # Skip test-harness predicates (PropertyChecker is the violation
+            # oracle, not consensus logic — including it would be circular).
+            if 'PropertyChecker' in pred_id:
+                continue
+
             observation = parts[4] == '1'
 
             key_true = pred_id + ' is true'
