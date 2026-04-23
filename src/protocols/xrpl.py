@@ -50,6 +50,47 @@ class XRPLProtocol(ConsensusProtocol):
         with open(os.path.join(run_dir, 'results.txt'), 'r') as f:
             return 'reason: all committed' in f.read()
 
+    def parse_baseline_observations(self, run_path: str) -> tuple[bool, dict[str, bool], str] | None:
+        """Parse PRED annotations from XRPL validator logs."""
+        results_path = os.path.join(run_path, 'results.txt')
+        if not os.path.exists(results_path):
+            return None
+        # Determine success from results.txt
+        with open(results_path, 'r') as f:
+            correct = 'reason: all committed' in f.read()
+
+        observations = {}
+
+        # Read PRED annotations from all 7 validator logs
+        for i in range(self.get_num_nodes()):
+            log_path = os.path.join(run_path, f'validator_{i}.txt')
+            if not os.path.exists(log_path):
+                continue
+            with open(log_path, 'r') as f:
+                for line in f.readlines():
+                    if not line.startswith('PRED'):
+                        continue
+
+                    line = line.strip()[5:]  # Remove "PRED " prefix
+                    pred_id = " ".join(line.split(" ")[:-1])
+
+                    # Skip malformed PRED lines
+                    if 'PRED' in pred_id:
+                        continue
+
+                    observation = line.split(" ")[-1] == "1"
+
+                    if pred_id not in observations:
+                        observations[pred_id + ' is true'] = observation
+                        observations[pred_id + ' is false'] = not observation
+                    else:
+                        # Aggregate across nodes with OR logic
+                        observations[pred_id + ' is true'] = observation or observations[pred_id + ' is true']
+                        observations[pred_id + ' is false'] = (not observation) or observations[pred_id + ' is false']
+
+        run_name = run_path.replace("\\", "/")
+        return (correct, observations, run_name)
+
     def classify_run(self, run_dir: str) -> set:
         labels = set()
         if self.is_successful(run_dir):

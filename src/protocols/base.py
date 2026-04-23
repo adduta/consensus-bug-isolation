@@ -53,6 +53,18 @@ class ConsensusProtocol(ABC):
         """Return True if the run completed without any violations."""
 
     @abstractmethod
+    def parse_baseline_observations(self, run_path: str) -> tuple[bool, dict[str, bool], str] | None:
+        """
+        Parse PRED annotations from a run's log files for the baseline pipeline.
+
+        Returns:
+            Tuple of (is_successful, observations_dict, run_name), or None if
+            the run should be skipped.
+            observations_dict maps predicate IDs like "BRANCH File.java:123 is true"
+            to bool values, aggregated across all nodes/replicas with OR logic.
+        """
+
+    @abstractmethod
     def classify_run(self, run_dir: str) -> str:
         """
         Classify a run into a bug type.
@@ -87,6 +99,14 @@ class ConsensusProtocol(ABC):
         Returns:
             Dict mapping observation key → bool for insertion into a Report.
         """
+
+    def get_baseline_run_paths(self) -> list[str]:
+        """Run paths for the baseline pipeline. Defaults to get_run_paths()."""
+        return self.get_run_paths()
+
+    def iter_baseline_run_configs(self):
+        """Yield (config_label, run_paths) for baseline pipeline. Defaults to iter_run_configs()."""
+        return self.iter_run_configs()
 
     def filter_aggregation(self, aggregation: dict) -> dict:
         """
