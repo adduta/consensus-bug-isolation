@@ -1,5 +1,7 @@
 venv
 *-predicates-cache-*
+out/
+out copy/
 __pycache__
 cache/
 .idea/
