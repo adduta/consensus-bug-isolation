@@ -272,10 +272,12 @@ class PBFTProtocol(ConsensusProtocol):
 
     NUM_REPLICAS = 4
 
-    def __init__(self, scope: str | None = None, data_dir: str | None = None):
+    def __init__(self, scope: str | None = None, data_dir: str | None = None,
+                 filter_vc: bool = False):
         # scope: None = all configs, 'ss' = only -ss configs, 'as' = only -as configs
         self.scope = scope
         self._data_dir = data_dir
+        self._filter_vc = filter_vc
         self._cached_path: str | None = None
         self._cached_inboxes: dict[int, list] | None = None
 
@@ -388,53 +390,46 @@ class PBFTProtocol(ConsensusProtocol):
 
         partition = self._config_has_partition(run_path)
 
-        preprepare_ms   = [m for m in mutations if m.get('type') == 'PRE-PREPARE']
-        vc_nv_mutated   = any(m.get('type') in ('VIEW-CHANGE', 'NEW-VIEW') for m in mutations)
-        commit_mutated  = any(m.get('type') == 'COMMIT' for m in mutations)
-        prepare_mutated = any(m.get('type') == 'PREPARE' for m in mutations)
+        preprepare_ms = [m for m in mutations if m.get('type') == 'PRE-PREPARE']
+        vc_nv_mutated = any(m.get('type') in ('VIEW-CHANGE', 'NEW-VIEW') for m in mutations)
 
         has_validity_or_agreement = any(v['type'] in ('VALIDITY', 'AGREEMENT') for v in violations)
         has_termination = has_timer_timeout or has_reached_no_complete
         agreement_at_high_view = any(v['type'] == 'AGREEMENT' and v['view_no'] >= 2 for v in violations)
 
-        # Group A — Invalid Operation: PRE-PREPARE operation mutation at the correct slot.
-        # Require `operation` in the mutated payload; accept either a VALIDITY/AGREEMENT
-        # violation OR a no-partition timeout as evidence the mutation caused the failure.
+        # Operation Corruption: PP content tampered (op mutation at correct slot,
+        # or old request replayed at higher slot). Merges Invalid Operation and
+        # Seq-No Replay — same root cause family (primary's proposal corrupted).
         for m in preprepare_ms:
             ts, seq = m.get('timestamp'), m.get('seq-number')
             if ts is None or seq is None:
                 continue
             if ts == seq and 'operation' in m:
                 if has_validity_or_agreement or (not partition and not violations):
-                    groups.add('Invalid Operation')
-            # Group B — Seq-No Replay: old request replayed at a higher slot.
+                    groups.add('Operation Corruption')
             elif ts < seq:
-                groups.add('Seq-No Replay')
+                groups.add('Operation Corruption')
 
-        # Group C — View-Change Fault: VC/NV mutation that plausibly caused the failure.
-        # Only attribute VCF when there is causal evidence (timeout or AGREEMENT at view>=1).
+        # View-Change Fault: VC/NV mutation with causal evidence
+        # (timeout or AGREEMENT at view>=1).
         if vc_nv_mutated and (has_termination or any(v['type'] == 'AGREEMENT' and v['view_no'] >= 1 for v in violations)):
             groups.add('View-Change Fault')
 
-        # Group E — Split Brain: AGREEMENT violation at view_no >= 2 (multi-view partition).
+        # Split Brain: AGREEMENT violation at view_no >= 2 (multi-view safety break).
         if agreement_at_high_view:
             groups.add('Split Brain')
 
-        # Group F — Non-PP Mutation: COMMIT or PREPARE mutation causing timeout without
-        # any PRE-PREPARE or VC/NV mutation being the primary cause. These mutations
-        # disrupt the commit phase or prepare counting, stalling the protocol.
-        if ((commit_mutated or prepare_mutated) and not violations
-                and not vc_nv_mutated and not preprepare_ms and has_termination):
-            groups.add('Non-PP Mutation')
-
-        # Group D — Partition Timeout: fallback when no specific fault explains the failure.
+        # Quorum Stall: fallback for any remaining liveness failure — partition
+        # alone, or non-PP message corruption (PREPARE/COMMIT) with empty digest
+        # signature that the predicate space cannot witness. Same observable
+        # symptom (no quorum forms → timeout) regardless of trigger.
         if not groups:
-            groups.add('Partition Timeout')
+            groups.add('Quorum Stall')
 
         return groups
 
     def get_bug_types(self) -> list[str]:
-        return ['Invalid Operation', 'Seq-No Replay', 'View-Change Fault', 'Partition Timeout', 'Split Brain', 'Non-PP Mutation']
+        return ['Operation Corruption', 'View-Change Fault', 'Quorum Stall', 'Split Brain']
 
     def wrap_observations(self, pred: str, observed_nodes: set) -> dict[str, bool]:
         # Tolerance dimension: predicate true for the run if observed by > i replicas
@@ -442,7 +437,12 @@ class PBFTProtocol(ConsensusProtocol):
         return {f'"{pred}" > {i}': n > i for i in range(self.NUM_REPLICAS)}
 
     def filter_aggregation(self, aggregation: dict) -> dict:
-        return aggregation  # No post-processing needed for PBFT
+        if not self._filter_vc:
+            return aggregation
+        # Drop predicates involving ViewChange or NewView to suppress
+        # the dominant view-change signal and surface consensus predicates.
+        return {k: v for k, v in aggregation.items()
+                if 'ViewChange' not in k and 'NewView' not in k}
 
     def get_data_dir(self) -> str:
         return self._data_dir or 'out'

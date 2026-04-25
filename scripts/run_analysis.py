@@ -13,13 +13,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-def get_protocol(name: str, scope: str | None = None, data_dir: str | None = None):
+def get_protocol(name: str, scope: str | None = None, data_dir: str | None = None,
+                  filter_vc: bool = False):
     if name == 'xrpl':
         from src.protocols.xrpl import XRPLProtocol
         return XRPLProtocol()
     elif name == 'pbft':
         from src.protocols.pbft import PBFTProtocol
-        return PBFTProtocol(scope=scope, data_dir=data_dir)
+        return PBFTProtocol(scope=scope, data_dir=data_dir, filter_vc=filter_vc)
     else:
         print(f"Unknown protocol '{name}'. Choose from: xrpl, pbft", file=sys.stderr)
         sys.exit(1)
@@ -44,9 +45,14 @@ def main():
         '--data-dir', default=None,
         help='Override the default data directory (e.g. "out copy").'
     )
+    parser.add_argument(
+        '--filter-vc', action='store_true',
+        help='PBFT only: exclude ViewChange/NewView predicates from isolation.'
+    )
     args = parser.parse_args()
 
-    protocol = get_protocol(args.protocol, scope=args.scope, data_dir=args.data_dir)
+    protocol = get_protocol(args.protocol, scope=args.scope, data_dir=args.data_dir,
+                            filter_vc=args.filter_vc)
 
     if args.baseline:
         from scripts.baseline import run_baseline_analysis
