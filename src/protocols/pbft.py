@@ -75,14 +75,72 @@ class Commit:
     def __str__(self):
         return f'Commit(v={self.view_no}, s={self.seq_no}, r={self.replica_id})'
 
+def _extract_vc_proof_fields(prepared_proofs: list) -> dict:
+    """Extract sets/counts derived from a VIEW-CHANGE's prepared-proofs list.
+
+    Each proof entry has the form
+        {'seq-number': int, 'messages': [PRE-PREPARE, PREPARE, ...]}.
+    We collect raw values across all proofs and inner messages.
+    """
+    proof_seq_set = set()
+    pp_view_set, pp_seq_set = set(), set()
+    prep_view_set, prep_seq_set, prep_replica_set = set(), set(), set()
+    prep_replica_total = 0
+    for proof in prepared_proofs or []:
+        if not isinstance(proof, dict):
+            continue
+        sn = proof.get('seq-number')
+        if isinstance(sn, int):
+            proof_seq_set.add(sn)
+        for m in proof.get('messages', []) or []:
+            if not isinstance(m, dict):
+                continue
+            t = m.get('type')
+            v, s = m.get('view-number'), m.get('seq-number')
+            if t == 'PRE-PREPARE':
+                if isinstance(v, int): pp_view_set.add(v)
+                if isinstance(s, int): pp_seq_set.add(s)
+            elif t == 'PREPARE':
+                if isinstance(v, int): prep_view_set.add(v)
+                if isinstance(s, int): prep_seq_set.add(s)
+                rid = m.get('replica-id')
+                if isinstance(rid, int):
+                    prep_replica_set.add(rid)
+                    prep_replica_total += 1
+    return {
+        'proof_seq_set': proof_seq_set,
+        'pp_view_set': pp_view_set,
+        'pp_seq_set': pp_seq_set,
+        'prep_view_set': prep_view_set,
+        'prep_seq_set': prep_seq_set,
+        'prep_replica_set': prep_replica_set,
+        'prep_replica_total': prep_replica_total,
+    }
+
+
 class ViewChange:
-    __slots__ = ['new_view_no', 'last_seq_no', 'replica_id', 'peers']
+    __slots__ = ['new_view_no', 'last_seq_no', 'replica_id', 'peers',
+                 'proof_count',
+                 'proof_seq_set', 'pp_view_set', 'pp_seq_set',
+                 'prep_view_set', 'prep_seq_set', 'prep_replica_set',
+                 'prep_replica_total', 'prep_replica_distinct']
 
     def __init__(self, sender: int, msg: dict) -> None:
         self.new_view_no = msg.get('new-view-number', 0)
         self.last_seq_no = msg.get('last-seq-number', 0)
         self.replica_id  = sender
         self.peers       = {sender}
+        prepared_proofs  = msg.get('prepared-proofs', []) or []
+        self.proof_count = len(prepared_proofs)
+        f = _extract_vc_proof_fields(prepared_proofs)
+        self.proof_seq_set       = f['proof_seq_set']
+        self.pp_view_set         = f['pp_view_set']
+        self.pp_seq_set          = f['pp_seq_set']
+        self.prep_view_set       = f['prep_view_set']
+        self.prep_seq_set        = f['prep_seq_set']
+        self.prep_replica_set    = f['prep_replica_set']
+        self.prep_replica_total  = f['prep_replica_total']
+        self.prep_replica_distinct = len(f['prep_replica_set'])
 
     def __eq__(self, o):
         return isinstance(o, ViewChange) and (
@@ -139,14 +197,59 @@ _REPLICA_COMMIT_RE = re.compile(
 )
 
 class NewView:
-    __slots__ = ['new_view_no', 'num_vc_proofs', 'num_prepared_proofs', 'replica_id', 'peers']
+    __slots__ = ['new_view_no', 'num_vc_proofs', 'num_prepared_proofs', 'replica_id', 'peers',
+                 'vc_replica_set', 'vc_replica_distinct',
+                 'vc_inner_last_seq_set',
+                 'pp_view_set', 'pp_seq_set',
+                 'prep_view_set', 'prep_seq_set', 'prep_replica_set']
 
     def __init__(self, sender: int, msg: dict) -> None:
         self.new_view_no         = msg.get('new-view-number', 0)
-        self.num_vc_proofs       = len(msg.get('view-change-proofs', []))
-        self.num_prepared_proofs = len(msg.get('prepared-proofs', []))
+        vc_proofs = msg.get('view-change-proofs', []) or []
+        outer_pp_proofs = msg.get('prepared-proofs', []) or []
+        self.num_vc_proofs       = len(vc_proofs)
+        self.num_prepared_proofs = len(outer_pp_proofs)
         self.replica_id          = sender
         self.peers               = {sender}
+
+        # Aggregate fields across the inner VIEW-CHANGEs
+        vc_replica_set = set()
+        vc_inner_last_seq_set = set()
+        prep_view_set, prep_seq_set, prep_replica_set = set(), set(), set()
+        inner_pp_view_set, inner_pp_seq_set = set(), set()
+        for vc in vc_proofs:
+            if not isinstance(vc, dict):
+                continue
+            rid = vc.get('replica-id')
+            if isinstance(rid, int):
+                vc_replica_set.add(rid)
+            ls = vc.get('last-seq-number')
+            if isinstance(ls, int):
+                vc_inner_last_seq_set.add(ls)
+            inner = _extract_vc_proof_fields(vc.get('prepared-proofs', []) or [])
+            inner_pp_view_set.update(inner['pp_view_set'])
+            inner_pp_seq_set.update(inner['pp_seq_set'])
+            prep_view_set.update(inner['prep_view_set'])
+            prep_seq_set.update(inner['prep_seq_set'])
+            prep_replica_set.update(inner['prep_replica_set'])
+
+        # Outer prepared-proofs is a flat list of PRE-PREPARE messages
+        outer_pp_view_set, outer_pp_seq_set = set(), set()
+        for m in outer_pp_proofs:
+            if not isinstance(m, dict):
+                continue
+            v, s = m.get('view-number'), m.get('seq-number')
+            if isinstance(v, int): outer_pp_view_set.add(v)
+            if isinstance(s, int): outer_pp_seq_set.add(s)
+
+        self.vc_replica_set        = vc_replica_set
+        self.vc_replica_distinct   = len(vc_replica_set)
+        self.vc_inner_last_seq_set = vc_inner_last_seq_set
+        self.pp_view_set           = inner_pp_view_set | outer_pp_view_set
+        self.pp_seq_set            = inner_pp_seq_set | outer_pp_seq_set
+        self.prep_view_set         = prep_view_set
+        self.prep_seq_set          = prep_seq_set
+        self.prep_replica_set      = prep_replica_set
 
     def __eq__(self, o):
         return isinstance(o, NewView) and (
@@ -312,13 +415,20 @@ class PBFTProtocol(ConsensusProtocol):
             (Commit,     'view_no',             'view_current'),
             (Commit,     'seq_no',              'seqno'),
             (Commit,     'peers',               set[int]),
-            (ViewChange, 'new_view_no',         'view_next'),
-            (ViewChange, 'last_seq_no',         'seqno'),
-            (ViewChange, 'peers',               set[int]),
-            (NewView,    'new_view_no',         'view_next'),
-            (NewView,    'num_vc_proofs',       'vc_proof_count'),
-            (NewView,    'num_prepared_proofs', 'prep_proof_count'),
-            (NewView,    'peers',               set[int]),
+            (ViewChange, 'new_view_no',           'view_next'),
+            (ViewChange, 'last_seq_no',           'seqno'),
+            (ViewChange, 'peers',                 set[int]),
+            (ViewChange, 'proof_count',           'proof_count'),
+            (ViewChange, 'pp_seq_set',            'pp_seq_set'),
+            (ViewChange, 'prep_replica_set',      'prep_replica_set'),
+            (NewView,    'new_view_no',           'view_next'),
+            (NewView,    'num_vc_proofs',         'vc_proof_count'),
+            (NewView,    'num_prepared_proofs',   'prep_proof_count'),
+            (NewView,    'peers',                 set[int]),
+            (NewView,    'vc_replica_set',        'vc_replica_set'),
+            (NewView,    'vc_inner_last_seq_set', 'vc_inner_last_seq_set'),
+            (NewView,    'pp_seq_set',            'pp_seq_set'),
+            (NewView,    'prep_replica_set',      'prep_replica_set'),
             (ReplicaCommit, 'view_no',          'view_current'),
             (ReplicaCommit, 'seq_no',           'seqno'),
             (ReplicaCommit, 'operation_first',  'op_first'),
@@ -466,7 +576,7 @@ class PBFTProtocol(ConsensusProtocol):
 
     def get_cache_path(self, run_path: str, node_id: int) -> str:
         stem = run_path[:-4]  # Strip .txt
-        return f'{stem}-predicates-cache-{node_id}.txt'
+        return f'{stem}-predicates-cache-{node_id}.txt.gz'
 
     def iter_run_configs(self):
         for config in sorted(os.listdir(self.get_data_dir())):

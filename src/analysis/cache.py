@@ -13,6 +13,7 @@ Key responsibilities:
 """
 
 # Standard library imports
+import gzip
 import itertools
 import json
 import operator as op
@@ -177,6 +178,17 @@ OPERATORS_BY_TYPE = {
     'proof_count':[op.eq, op.ne, op.lt, op.gt],
     'vc_proof_count':   [op.eq, op.ne, op.lt, op.gt],
     'prep_proof_count': [op.eq, op.ne, op.lt, op.gt],
+    'distinct_count':   [op.eq, op.ne, op.lt, op.gt],
+    # Proof-derived sets (extracted from VIEW-CHANGE / NEW-VIEW prepared-proofs).
+    # Treated as set[int] but with distinct categories so unrelated semantic
+    # fields (e.g. PrePrepare.peers vs ViewChange.pp_seq_set) don't pair up.
+    'pp_view_set':       [op.eq, op.ne, set.isdisjoint, set.issubset, set.issuperset],
+    'pp_seq_set':        [op.eq, op.ne, set.isdisjoint, set.issubset, set.issuperset],
+    'prep_view_set':     [op.eq, op.ne, set.isdisjoint, set.issubset, set.issuperset],
+    'prep_seq_set':      [op.eq, op.ne, set.isdisjoint, set.issubset, set.issuperset],
+    'prep_replica_set':  [op.eq, op.ne, set.isdisjoint, set.issubset, set.issuperset],
+    'vc_replica_set':    [op.eq, op.ne, set.isdisjoint, set.issubset, set.issuperset],
+    'vc_inner_last_seq_set': [op.eq, op.ne, set.isdisjoint, set.issubset, set.issuperset],
 }
 
 def build_predicates(protocol) -> tuple[list[Predicate], dict]:
@@ -259,7 +271,8 @@ def load_predicate_cache(args):
         print(path, 'not cached')
         return None
 
-    with open(cache_path, 'r') as f:
+    opener = gzip.open if cache_path.endswith('.gz') else open
+    with opener(cache_path, 'rt') as f:
         cached_predicates = []
         for line in f.readlines():
             # Parse line format: "True/False True/False predicate_description"
@@ -345,5 +358,6 @@ def generate_predicate_cache(args):
         f'{ps.observed} {ps.observed_true} {str(ps)}\n'
         for ps in all_predicate_states
     ]
-    with open(cache_path, 'w') as f:
+    opener = gzip.open if cache_path.endswith('.gz') else open
+    with opener(cache_path, 'wt') as f:
         f.writelines(output_lines)

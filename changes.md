@@ -63,12 +63,17 @@ Before:
 
 After:
 
-| Class | Count | % |
-|---|---|---|
-| Quorum Stall | 344 | 81.9% |
-| Operation Corruption | 54 | 12.9% |
-| View-Change Fault | 22 | 5.2% |
-| Split Brain | 2 | 0.5% |
+Dataset: 2800 runs (14 configs × 200), 2380 correct (85.0%), **420 failures (15.0%)**.
+
+| Bug class | Count | % of failures | % of all runs |
+|---|---:|---:|---:|
+| Quorum Stall | 344 | 81.9% | 12.3% |
+| Operation Corruption | 54 | 12.9% | 1.9% |
+| View-Change Fault | 22 | 5.2% | 0.8% |
+| Split Brain | 2 | 0.5% | 0.07% |
+| **Total failures** | **420** | **100.0%** | **15.0%** |
+
+Multi-label runs: 2 (the rest are single-label).
 
 Multi-label runs dropped from 4 → 2 (the IO+SNR and PT+NPP overlaps collapsed
 cleanly into single labels).
