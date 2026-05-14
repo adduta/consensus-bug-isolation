@@ -2,22 +2,28 @@ import math
 
 
 class Aggregation:
+    # Success-side buckets are stored as integer counters rather than sets.
+    # `removed` in isolate() is always a subset of failed runs, so the
+    # success-side sets never shrink — len() is the only thing ever read
+    # from them. Cuts Phase 2 aggregation memory roughly in half.
+    __slots__ = ('failure_true', 'failure_false',
+                 'successful_true_count', 'successful_false_count')
 
     def __init__(self):
         self.failure_true = set()
         self.failure_false = set()
-        self.successful_true = set()
-        self.successful_false = set()
+        self.successful_true_count = 0
+        self.successful_false_count = 0
 
     def failure(self):
-        observed_true = len(self.failure_true) + len(self.successful_true)
+        observed_true = len(self.failure_true) + self.successful_true_count
         if observed_true == 0:
             return 0
         return len(self.failure_true) / observed_true
 
     def context(self):
         observed = len(self.failure_true) + len(self.failure_false) + \
-            len(self.successful_true) + len(self.successful_false)
+            self.successful_true_count + self.successful_false_count
         if observed == 0:
             return 0
         return (len(self.failure_true) + len(self.failure_false)) / observed
@@ -32,13 +38,16 @@ class Aggregation:
         return 2 / ((1 / increase) + (1 / (math.log(len(self.failure_true)) / math.log(total_failures))))
 
     def __str__(self) -> str:
-        return f"(f_true: {len(self.failure_true)}, f_false: {len(self.failure_false)}, s_true: {len(self.successful_true)}, s_false: {len(self.successful_false)})"
-    
+        return f"(f_true: {len(self.failure_true)}, f_false: {len(self.failure_false)}, s_true: {self.successful_true_count}, s_false: {self.successful_false_count})"
+
     def __eq__(self, __value: object) -> bool:
         if not isinstance(__value, Aggregation):
             return False
         other: Aggregation = __value
-        return self.successful_true == other.successful_true and self.successful_false == other.successful_false and self.failure_true == other.failure_true and self.failure_false == other.failure_false
+        return (self.successful_true_count == other.successful_true_count
+                and self.successful_false_count == other.successful_false_count
+                and self.failure_true == other.failure_true
+                and self.failure_false == other.failure_false)
 
 
 class Report:
@@ -57,9 +66,9 @@ def aggregate(reports: list[Report]):
             if id not in aggregation:
                 aggregation[id] = Aggregation()
             if report.successful and observed_true:
-                aggregation[id].successful_true.add(report.name)
+                aggregation[id].successful_true_count += 1
             elif report.successful and not observed_true:
-                aggregation[id].successful_false.add(report.name)
+                aggregation[id].successful_false_count += 1
             elif not report.successful and observed_true:
                 aggregation[id].failure_true.add(report.name)
             elif not report.successful and not observed_true:
@@ -141,9 +150,9 @@ def isolate(reports: list[Report], aggregations:dict[str, Aggregation]={}, stats
     for (predicate, y) in predicates:
         aggregations.pop(predicate)
 
+    # `removed` is always a subset of failed runs, so success-side counters
+    # are unaffected and don't need updating.
     for aggregation in aggregations.values():
-        aggregation.successful_true.difference_update(removed)
-        aggregation.successful_false.difference_update(removed)
         aggregation.failure_true.difference_update(removed)
         aggregation.failure_false.difference_update(removed)
 

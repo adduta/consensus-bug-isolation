@@ -143,11 +143,12 @@ def aggregate_predicate_observations(reports: list[Report], aggregation: dict[st
             if predicate_id not in aggregation:
                 aggregation[predicate_id] = Aggregation()
 
-            # Categorize this observation based on success and observation status
+            # Categorize this observation based on success and observation status.
+            # Success-side buckets are counters (see Aggregation docstring).
             if report.successful and observed_true:
-                aggregation[predicate_id].successful_true.add(report.name)
+                aggregation[predicate_id].successful_true_count += 1
             elif report.successful and not observed_true:
-                aggregation[predicate_id].successful_false.add(report.name)
+                aggregation[predicate_id].successful_false_count += 1
             elif not report.successful and observed_true:
                 aggregation[predicate_id].failure_true.add(report.name)
             elif not report.successful and not observed_true:

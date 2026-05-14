@@ -182,13 +182,15 @@ OPERATORS_BY_TYPE = {
     # Proof-derived sets (extracted from VIEW-CHANGE / NEW-VIEW prepared-proofs).
     # Treated as set[int] but with distinct categories so unrelated semantic
     # fields (e.g. PrePrepare.peers vs ViewChange.pp_seq_set) don't pair up.
-    'pp_view_set':       [op.eq, op.ne, set.isdisjoint, set.issubset, set.issuperset],
-    'pp_seq_set':        [op.eq, op.ne, set.isdisjoint, set.issubset, set.issuperset],
-    'prep_view_set':     [op.eq, op.ne, set.isdisjoint, set.issubset, set.issuperset],
-    'prep_seq_set':      [op.eq, op.ne, set.isdisjoint, set.issubset, set.issuperset],
-    'prep_replica_set':  [op.eq, op.ne, set.isdisjoint, set.issubset, set.issuperset],
-    'vc_replica_set':    [op.eq, op.ne, set.isdisjoint, set.issubset, set.issuperset],
-    'vc_inner_last_seq_set': [op.eq, op.ne, set.isdisjoint, set.issubset, set.issuperset],
+    # Subset/superset/disjoint comparators produced low-signal noise predicates
+    # (high s_true, marginal increase) — restricted to eq/ne only.
+    'pp_view_set':       [op.eq, op.ne],
+    'pp_seq_set':        [op.eq, op.ne],
+    'prep_view_set':     [op.eq, op.ne],
+    'prep_seq_set':      [op.eq, op.ne],
+    'prep_replica_set':  [op.eq, op.ne],
+    'vc_replica_set':    [op.eq, op.ne],
+    'vc_inner_last_seq_set': [op.eq, op.ne],
 }
 
 def build_predicates(protocol) -> tuple[list[Predicate], dict]:
