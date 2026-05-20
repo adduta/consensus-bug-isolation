@@ -502,6 +502,7 @@ class PBFTProtocol(ConsensusProtocol):
 
         preprepare_ms = [m for m in mutations if m.get('type') == 'PRE-PREPARE']
         vc_nv_mutated = any(m.get('type') in ('VIEW-CHANGE', 'NEW-VIEW') for m in mutations)
+        non_pp_mutated = any(m.get('type') in ('PREPARE', 'COMMIT', 'REPLY') for m in mutations)
 
         has_validity_or_agreement = any(v['type'] in ('VALIDITY', 'AGREEMENT') for v in violations)
         has_termination = has_timer_timeout or has_reached_no_complete
@@ -529,17 +530,25 @@ class PBFTProtocol(ConsensusProtocol):
         if agreement_at_high_view:
             groups.add('Split Brain')
 
-        # Quorum Stall: fallback for any remaining liveness failure — partition
-        # alone, or non-PP message corruption (PREPARE/COMMIT) with empty digest
-        # signature that the predicate space cannot witness. Same observable
-        # symptom (no quorum forms → timeout) regardless of trigger.
+        # Liveness-stall fallback, split by observable mutation footprint:
+        #   - Non-PP Mutation: a PREPARE/COMMIT/REPLY mutation is visible in
+        #     the log (Group F in the root-cause taxonomy). The mutation event
+        #     itself is wire-observable even though digest equality predicates
+        #     cannot fire on empty digests.
+        #   - Partition Timeout: pure network-partition stall with no Byzantine
+        #     mutation visible (Group D). The classifier reaches here only when
+        #     OC, VCF, SB did not fire.
         if not groups:
-            groups.add('Quorum Stall')
+            if non_pp_mutated:
+                groups.add('Non-PP Mutation')
+            else:
+                groups.add('Partition Timeout')
 
         return groups
 
     def get_bug_types(self) -> list[str]:
-        return ['Operation Corruption', 'View-Change Fault', 'Quorum Stall', 'Split Brain']
+        return ['Operation Corruption', 'View-Change Fault',
+                'Partition Timeout', 'Non-PP Mutation', 'Split Brain']
 
     def wrap_observations(self, pred: str, observed_nodes: set) -> dict[str, bool]:
         # Tolerance dimension: predicate true for the run if observed by > i replicas

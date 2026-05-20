@@ -5,6 +5,7 @@ out copy/
 data/
 __pycache__
 cache/
+logs/
 .idea/
 .serena/
 .claude

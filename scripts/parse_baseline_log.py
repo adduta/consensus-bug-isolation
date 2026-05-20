@@ -25,12 +25,25 @@ AGG_LINE_RE = re.compile(r'^(\d+) aggregations')
 FILT_LINE_RE = re.compile(r'^(\d+) filtered aggregations')
 BUG_HEADER_RE = re.compile(r'┃ Configuration ┃')
 SCORE_HEADER_RE = re.compile(r'┃ Metric')
-SCORE_ROW_RE = re.compile(
-    r'^│\s+(\w[\w.]*)\s+│\s+([\d.]+)%\s+│\s+([\d.]+)%\s+│\s+([\d.]+)%\s+│\s+([\d.]+)%\s+│'
-)
-COUNT_ROW_RE = re.compile(
-    r'^│\s+(\S.*?)\s+│\s+(\d+)\s+│\s+(\d+)\s+│\s+(\d+)\s+│\s+(\d+)\s+│\s+(\d+)\s+│\s+(\d+)\s+│'
-)
+PERCENT_CELL_RE = re.compile(r'^([\d.]+)%$')
+
+# Bug classes in the order produced by PBFTProtocol.get_bug_types().
+CLASS_ORDER = ['OC', 'VCF', 'PT', 'NPP', 'SB']
+CLASS_LABEL = {
+    'OC': 'Operation Corruption',
+    'VCF': 'View-Change Fault',
+    'PT': 'Partition Timeout',
+    'NPP': 'Non-PP Mutation',
+    'SB': 'Split Brain',
+}
+
+
+def _split_row(line: str) -> list[str] | None:
+    """Split a │-delimited rich-table row into stripped cells."""
+    s = line.strip()
+    if not (s.startswith('│') and s.endswith('│')):
+        return None
+    return [c.strip() for c in s[1:-1].split('│')]
 
 
 def parse(log_text: str):
@@ -108,40 +121,41 @@ def parse(log_text: str):
             continue
 
         if in_count_table and current is not None:
-            m = COUNT_ROW_RE.match(line)
-            if m:
-                current['config_counts'].append({
-                    'config': m.group(1).strip(),
-                    'total': int(m.group(2)),
-                    'correct': int(m.group(3)),
-                    'oc': int(m.group(4)),
-                    'vcf': int(m.group(5)),
-                    'qs': int(m.group(6)),
-                    'sb': int(m.group(7)),
-                })
-                continue
+            cells = _split_row(line)
+            if cells and len(cells) == 3 + len(CLASS_ORDER):
+                try:
+                    total = int(cells[1])
+                    correct = int(cells[2])
+                    per_class = {cls: int(cells[3 + i]) for i, cls in enumerate(CLASS_ORDER)}
+                except ValueError:
+                    pass
+                else:
+                    current['config_counts'].append({
+                        'config': cells[0],
+                        'total': total,
+                        'correct': correct,
+                        **per_class,
+                    })
+                    continue
 
         if in_score_table and current is not None:
-            m = SCORE_ROW_RE.match(line)
-            if m:
-                metric_name = m.group(1)
-                current['metrics'][metric_name] = {
-                    'OC': float(m.group(2)),
-                    'VCF': float(m.group(3)),
-                    'QS': float(m.group(4)),
-                    'SB': float(m.group(5)),
-                }
-                continue
+            cells = _split_row(line)
+            if cells and len(cells) == 1 + len(CLASS_ORDER):
+                vals = []
+                ok = True
+                for c in cells[1:]:
+                    mp = PERCENT_CELL_RE.match(c)
+                    if not mp:
+                        ok = False
+                        break
+                    vals.append(float(mp.group(1)))
+                if ok:
+                    current['metrics'][cells[0]] = dict(zip(CLASS_ORDER, vals))
+                    continue
 
     return iterations
 
 
-CLASS_LABEL = {
-    'OC': 'Operation Corruption',
-    'VCF': 'View-Change Fault',
-    'QS': 'Quorum Stall',
-    'SB': 'Split Brain',
-}
 METRIC_ORDER = ['Precision', 'Recall', 'F1', 'F0.5', 'Specifity', 'Accuracy']
 
 
@@ -154,7 +168,7 @@ def best_class(metrics: dict) -> str:
 
 def render(iterations):
     out = []
-    out.append('# PBFT BASELINE Results — New 4-Class Taxonomy')
+    out.append('# PBFT BASELINE Results — 5-Class Taxonomy')
     out.append('')
     out.append('Pipeline: **PRED-annotation baseline** (`scripts/baseline.py`). Predicates '
                'come from `PRED` markers emitted by the instrumented PBFT replica '
@@ -164,7 +178,8 @@ def render(iterations):
                '2380 correct, 420 failures.')
     out.append('')
     out.append('Bug classes: **Operation Corruption (OC)**, **View-Change Fault (VCF)**, '
-               '**Quorum Stall (QS)**, **Split Brain (SB)**.')
+               '**Partition Timeout (PT)**, **Non-PP Mutation (NPP)**, '
+               '**Split Brain (SB)**.')
     out.append('')
     out.append(f'Iterations: {len(iterations)}.')
     out.append('')
@@ -220,20 +235,17 @@ def render(iterations):
         out.append('')
 
         if it['metrics']:
-            out.append('| Metric | Operation Corruption | View-Change Fault | Quorum Stall | Split Brain |')
-            out.append('|--------|----------------------|-------------------|--------------|-------------|')
+            header = '| Metric | ' + ' | '.join(CLASS_LABEL[c] for c in CLASS_ORDER) + ' |'
+            sep = '|--------|' + '|'.join(['-' * (len(CLASS_LABEL[c]) + 2) for c in CLASS_ORDER]) + '|'
+            out.append(header)
+            out.append(sep)
             for metric in METRIC_ORDER:
                 row = it['metrics'].get(metric)
                 if not row:
                     continue
                 display_name = 'Specificity' if metric == 'Specifity' else metric
-                out.append(
-                    f"| {display_name} "
-                    f"| {row['OC']:.1f}% "
-                    f"| {row['VCF']:.1f}% "
-                    f"| {row['QS']:.1f}% "
-                    f"| {row['SB']:.1f}% |"
-                )
+                cells = ' | '.join(f"{row[c]:.1f}%" for c in CLASS_ORDER)
+                out.append(f"| {display_name} | {cells} |")
             out.append('')
 
         if it['removed_runs']:
@@ -251,31 +263,28 @@ def render(iterations):
         out.append('')
         out.append('Counts are static across iterations (the classifier is run once per run path).')
         out.append('')
-        out.append('| Configuration | Total | Correct | Operation Corruption | View-Change Fault | Quorum Stall | Split Brain |')
-        out.append('|---------------|-------|---------|----------------------|-------------------|--------------|-------------|')
+        header = ('| Configuration | Total | Correct | '
+                  + ' | '.join(CLASS_LABEL[c] for c in CLASS_ORDER) + ' |')
+        sep = ('|---------------|-------|---------|'
+               + '|'.join(['-' * (len(CLASS_LABEL[c]) + 2) for c in CLASS_ORDER]) + '|')
+        out.append(header)
+        out.append(sep)
         for row in iterations[0]['config_counts']:
+            cells = ' | '.join(str(row[c]) for c in CLASS_ORDER)
             out.append(
-                f"| {row['config']} "
-                f"| {row['total']} "
-                f"| {row['correct']} "
-                f"| {row['oc']} "
-                f"| {row['vcf']} "
-                f"| {row['qs']} "
-                f"| {row['sb']} |"
+                f"| {row['config']} | {row['total']} | {row['correct']} | {cells} |"
             )
         out.append('')
 
     if iterations and iterations[0]['config_counts']:
-        totals = {'total': 0, 'correct': 0, 'oc': 0, 'vcf': 0, 'qs': 0, 'sb': 0}
+        totals = {k: 0 for k in ['total', 'correct'] + CLASS_ORDER}
         for row in iterations[0]['config_counts']:
             for k in totals:
                 totals[k] += row[k]
+        class_phrase = ', '.join(f"{totals[c]} {CLASS_LABEL[c]}" for c in CLASS_ORDER)
         out.append('**Totals across all configs**: '
                    f"{totals['total']} runs, {totals['correct']} correct, "
-                   f"{totals['oc']} Operation Corruption, "
-                   f"{totals['vcf']} View-Change Fault, "
-                   f"{totals['qs']} Quorum Stall, "
-                   f"{totals['sb']} Split Brain.")
+                   f"{class_phrase}.")
         out.append('')
 
     return '\n'.join(out)

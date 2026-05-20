@@ -3,15 +3,17 @@ from src.protocols.pbft import PBFTProtocol, PrePrepare, Prepare, Commit, ViewCh
 
 protocol = PBFTProtocol()
 
-# operation mutation, validity+agreement
-INVALID_OPERATION_FILE = 'out/tests-D0-C1-ss/out95.txt'
-# seq-number mutation, agreement only after view-change
-SEQ_NO_REPLAY_FILE = 'out/tests-D1-C2-ss/out7.txt'
-# view-change fault, termination
+# Group A: PRE-PREPARE operation mutation, validity+agreement violation
+OPERATION_CORRUPTION_FILE = 'out/tests-D0-C1-ss/out95.txt'
+# Group B: PRE-PREPARE seq-number mutation (also Operation Corruption in 5-class)
+OPERATION_CORRUPTION_SEQ_FILE = 'out/tests-D1-C2-ss/out7.txt'
+# Group C: VC/NV mutation, termination
 VIEW_CHANGE_FAULT_FILE = 'out/tests-D1-C2-ss/out49.txt'
-# partition timeout, termination
+# Group D: pure partition stall, termination, no Byzantine mutation
 PARTITION_TIMEOUT_FILE = 'out/tests-D1-C0/out115.txt'
-# split-brain, agreement, high viewNo
+# Group F: COMMIT/PREPARE/REPLY mutation + partition, termination
+NON_PP_MUTATION_FILE = 'out/tests-D1-C1-as/out57.txt'
+# Group E: split-brain, agreement at view ≥ 2
 SPLIT_BRAIN_FILE = 'out/tests-D2-C0/out87.txt'
 # correct run (no violation)
 CORRECT_FILE = 'out/tests-D1-C0/out1.txt'
@@ -22,31 +24,32 @@ def _skip_if_absent(path):
         pytest.skip(f'{path} not present')
 
 def test_get_num_nodes():
-    assert protocol.get_num_nodes() == 1
+    assert protocol.get_num_nodes() == 4
 
 def test_get_bug_types():
     assert set(protocol.get_bug_types()) == {
-        'Invalid Operation', 'Seq-No Replay', 'View-Change Fault', 'Partition Timeout', 'Split Brain'
+        'Operation Corruption', 'View-Change Fault',
+        'Partition Timeout', 'Non-PP Mutation', 'Split Brain',
     }
 
 def test_get_fields_covers_root_causes():
     fields = protocol.get_fields()
     field_names = [f[1] for f in fields]
-    # Invalid Operation / Seq-No Replay require PRE-PREPARE fields
+    # Operation Corruption requires PRE-PREPARE fields
     assert 'operation_first' in field_names
     assert 'seq_no' in field_names
     # View-Change Fault requires VIEW-CHANGE
     assert 'new_view_no' in field_names
 
-def test_classify_run_invalid_operation():
-    _skip_if_absent(INVALID_OPERATION_FILE)
-    result = protocol.classify_run(INVALID_OPERATION_FILE)
-    assert 'Invalid Operation' in result
+def test_classify_run_operation_corruption_op():
+    _skip_if_absent(OPERATION_CORRUPTION_FILE)
+    result = protocol.classify_run(OPERATION_CORRUPTION_FILE)
+    assert 'Operation Corruption' in result
 
-def test_classify_run_seq_no_replay():
-    _skip_if_absent(SEQ_NO_REPLAY_FILE)
-    result = protocol.classify_run(SEQ_NO_REPLAY_FILE)
-    assert 'Seq-No Replay' in result
+def test_classify_run_operation_corruption_seq():
+    _skip_if_absent(OPERATION_CORRUPTION_SEQ_FILE)
+    result = protocol.classify_run(OPERATION_CORRUPTION_SEQ_FILE)
+    assert 'Operation Corruption' in result
 
 def test_classify_run_view_change_fault():
     _skip_if_absent(VIEW_CHANGE_FAULT_FILE)
@@ -58,6 +61,11 @@ def test_classify_run_partition_timeout():
     result = protocol.classify_run(PARTITION_TIMEOUT_FILE)
     assert 'Partition Timeout' in result
 
+def test_classify_run_non_pp_mutation():
+    _skip_if_absent(NON_PP_MUTATION_FILE)
+    result = protocol.classify_run(NON_PP_MUTATION_FILE)
+    assert 'Non-PP Mutation' in result
+
 def test_classify_run_split_brain():
     _skip_if_absent(SPLIT_BRAIN_FILE)
     result = protocol.classify_run(SPLIT_BRAIN_FILE)
@@ -68,8 +76,8 @@ def test_is_successful_on_non_violation():
     assert protocol.is_successful(CORRECT_FILE) is True
 
 def test_parse_log_returns_preprepare():
-    _skip_if_absent(INVALID_OPERATION_FILE)
-    messages = protocol.parse_log(INVALID_OPERATION_FILE)
+    _skip_if_absent(OPERATION_CORRUPTION_FILE)
+    messages = protocol.parse_log(OPERATION_CORRUPTION_FILE)
     assert any(isinstance(m, PrePrepare) for m in messages)
 
 def test_filter_messages_is_noop():

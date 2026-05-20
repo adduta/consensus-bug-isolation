@@ -93,6 +93,112 @@ cleanly into single labels).
    - `PBFT_BASELINE_VS_ISOLATION.md`
    - `PBFT_ISOLATION_RESULTS.md`
 
+## Workaround A — Re-split Quorum Stall into Partition Timeout + Non-PP Mutation
+
+### Motivation
+
+Both isolation and baseline pipelines bottomed out at the same observation:
+the `Quorum Stall` class lumps two root-cause groups together —
+
+- **Group D** (267 cases): network partition prevents quorum → timeout. No
+  Byzantine mutation visible.
+- **Group F** (77 cases): COMMIT / PREPARE / REPLY mutation prevents quorum
+  formation → timeout. A non-PP mutation event is visible in the log.
+
+The 6→4 merge above collapsed these under the rationale that the predicate
+space cannot disentangle them. That rationale is correct for *content-level*
+predicates over empty `digest` fields, but it overlooks that the *mutation
+event itself* is wire-observable — the classifier reads it from the
+`- Mutated:` log markers. So while predicates can't witness the corruption
+of an individual COMMIT, the classifier *can* tell whether a non-PP mutation
+occurred in the run. Splitting along that axis recovers a clean
+distinction.
+
+### Implementation
+
+`src/protocols/pbft.py` `classify_run()` and `get_bug_types()`:
+
+- Added a `non_pp_mutated` flag derived from the existing mutations list
+  (true if any mutation has `type ∈ {PREPARE, COMMIT, REPLY}`).
+- Replaced the single `Quorum Stall` fallback branch with a split:
+  - `Non-PP Mutation` when no higher-priority class fires *and* a non-PP
+    mutation is visible.
+  - `Partition Timeout` when no higher-priority class fires *and* no
+    Byzantine mutation is visible (pure-partition stall).
+- `get_bug_types()` now returns the 5-class list:
+  `['Operation Corruption', 'View-Change Fault', 'Partition Timeout',
+    'Non-PP Mutation', 'Split Brain']`.
+
+The OC / VCF / SB branches are unchanged. Priority order is preserved: VCF
+runs that *also* carry a non-PP mutation still classify as VCF only, matching
+the existing single-fallback semantics.
+
+### New 5-class distribution (verified against `out copy/`, 420 failures)
+
+| Bug class            | Count | % of failures |
+|----------------------|------:|--------------:|
+| Partition Timeout    |   267 |        63.6 % |
+| Non-PP Mutation      |    77 |        18.3 % |
+| Operation Corruption |    54 |        12.9 % |
+| View-Change Fault    |    22 |         5.2 % |
+| Split Brain          |     2 |         0.5 % |
+
+Per-config counts match the root-cause document's Groups D and F line-by-line.
+Multi-label runs unchanged at 2.
+
+### Expected impact on isolation / baseline pipelines
+
+Previously the most powerful predicate in both pipelines was a coarse
+view-change-count predicate (isolation iter 1: P=94 % R=64 % F1=76 %;
+baseline iter 1: P=91 % R=78 % F1=84 %) that conflated D and F. With the
+split, that same iteration's predicate should partition cleanly into
+Partition Timeout, while iterations targeting `COMMIT.view_no` /
+`COMMIT.seq_no` mismatches (already in the predicate space) should surface
+a dedicated Non-PP Mutation winner. Net: an additional high-F1 class
+becomes findable without changing the grammar.
+
+### Downstream artifacts updated alongside the classifier split
+
+The rendering pieces that hardcoded the 4-class layout have been
+refactored to be data-driven over a `CLASS_ORDER` list, so future taxonomy
+changes only require updating that constant.
+
+- `scripts/parse_isolation_log.py`:
+  - Replaced positional `SCORE_ROW_RE` / `COUNT_ROW_RE` (4 fixed
+    percent / integer captures) with a `_split_row()` helper that splits
+    on `│` and zips the cell list against `CLASS_ORDER`.
+  - `CLASS_ORDER` now `['OC', 'VCF', 'PT', 'NPP', 'SB']` with matching
+    `CLASS_LABEL` entries.
+  - Render emits markdown headers, separator rows, metric rows, per-config
+    counts, and the totals phrase by iterating `CLASS_ORDER` instead of
+    spelling out four columns.
+  - Title bumped to `5-Class Taxonomy`; the bug-classes blurb now lists
+    PT and NPP as separate classes.
+- `scripts/parse_baseline_log.py`: same refactor and constants. Both
+  parsers now share an identical class-handling shape.
+- `tests/test_pbft_protocol.py`:
+  - `test_get_bug_types` updated to expect the new 5-class set.
+  - Renamed `INVALID_OPERATION_FILE` → `OPERATION_CORRUPTION_FILE` and
+    folded the seq-no-replay path into a second
+    `OPERATION_CORRUPTION_SEQ_FILE` (both classify as Operation Corruption
+    in the merged taxonomy).
+  - Added `NON_PP_MUTATION_FILE` (`tests-D1-C1-as/out57.txt`, a Group F
+    case from the root-cause doc) and a matching `test_classify_run_*`
+    case.
+  - Fixed a pre-existing stale assertion (`test_get_num_nodes` was
+    expecting `1`; PBFT has 4 replicas).
+  - The non-classifier tests (`parse_log`, message-shape tests) updated
+    to reference the renamed constant.
+- `pbft_results/PBFT_NEW_TAXONOMY_RESULTS.md` and
+  `pbft_results/PBFT_BASELINE_NEW_TAXONOMY_RESULTS.md` are still the
+  4-class snapshots; they will be regenerated when the next analysis log
+  is produced and piped through the updated parsers.
+
+`scripts/analyze.py` and `scripts/bug_distribution.py` are unchanged — both
+already iterate over `protocol.get_bug_types()`. The rich-table output now
+naturally widens to 5 class columns; the bug-distribution run reported
+above confirms the new counts match Groups D and F line-by-line.
+
 ## Predicate-space gaps (not addressed by this change)
 
 These are **observability** limitations of the log format, not classifier
