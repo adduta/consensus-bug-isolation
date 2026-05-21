@@ -1,5 +1,7 @@
 import pytest
-from src.protocols.pbft import PBFTProtocol, PrePrepare, Prepare, Commit, ViewChange
+from src.protocols.pbft import (
+    PBFTProtocol, PrePrepare, Prepare, Commit, ViewChange,
+)
 
 protocol = PBFTProtocol()
 
@@ -90,3 +92,69 @@ def test_wrap_observations_single_entry():
     # PBFT: one threshold entry (observed by >= 1 replica)
     assert '"some_pred" > 0' in obs
     assert obs['"some_pred" > 0'] is True
+
+def test_reply_mutation_to_client_is_non_pp(tmp_path):
+    run = tmp_path / 'tests-D0-C1-ss' / 'out1.txt'
+    run.parent.mkdir()
+    run.write_text(
+        '{"byzantineReplicaId":1,"networkFaults":[],"msgCorruptions":[{}]}\n'
+        '     - Mutated: 0 -> client {"type":"REPLY","view-number":0,'
+        '"timestamp":1,"client-id":"client-0","replica-id":0,"result":5}\n'
+        'Reached test duration: 10000 ms\n'
+    )
+
+    assert protocol.classify_run(str(run)) == {'Non-PP Mutation'}
+
+def test_partition_dominated_non_pp_is_partition_timeout(tmp_path):
+    run = tmp_path / 'tests-D1-C1-ss' / 'out1.txt'
+    run.parent.mkdir()
+    run.write_text(
+        '{"byzantineReplicaId":1,"networkFaults":[{}],"msgCorruptions":[{}]}\n'
+        'Sent: 1 -> 2 {"type":"COMMIT","view-number":0,"seq-number":0,'
+        '"digest":"","replica-id":1} ##2\n'
+        '     - Dropped: 1 -> 2{"type":"COMMIT","view-number":0,'
+        '"seq-number":0,"digest":"","replica-id":1} ##2\n'
+        'Sent: 1 -> 2 {"type":"COMMIT","view-number":0,"seq-number":0,'
+        '"digest":"","replica-id":1} ##3\n'
+        '     - Mutated: 1 -> 2{"type":"COMMIT","view-number":0,'
+        '"seq-number":0,"digest":"","replica-id":1} #3\n'
+        'Reached test duration: 10000 ms\n'
+    )
+
+    assert protocol.classify_run(str(run)) == {'Partition Timeout'}
+
+def test_preprepare_mutation_committed_is_operation_corruption(tmp_path):
+    run = tmp_path / 'tests-D0-C1-ss' / 'out1.txt'
+    run.parent.mkdir()
+    run.write_text(
+        '{"byzantineReplicaId":1,"networkFaults":[],"msgCorruptions":[{}]}\n'
+        'Sent: 0 -> 1 {"type":"PRE-PREPARE","view-number":0,'
+        '"seq-number":1,"digest":"","operation":{"first":2,"second":2},'
+        '"timestamp":1,"client":"client-0"} ##5\n'
+        'PRED BRANCH DefaultReplica.java:1 R1 0\n'
+        '     - Mutated: 0 -> 1{"type":"PRE-PREPARE","view-number":0,'
+        '"seq-number":1,"digest":"","operation":{"first":1,"second":2},'
+        '"timestamp":1,"client":"client-0"} #5\n'
+        'LOG-Replica-Commit:1 \tviewNo: 0 \tseqNo: 1 \trequest: '
+        "DRRequest{operation=AddOp{first=1, second=2}, timestamp=1, "
+        "clientId='client-0'}\n"
+        'Reached test duration: 10000 ms\n'
+    )
+
+    assert protocol.classify_run(str(run)) == {'Operation Corruption'}
+
+def test_commit_log_conflict_at_high_view_is_split_brain(tmp_path):
+    run = tmp_path / 'tests-D0-C0' / 'out1.txt'
+    run.parent.mkdir()
+    run.write_text(
+        '{"byzantineReplicaId":1,"networkFaults":[],"msgCorruptions":[]}\n'
+        'LOG-Replica-Commit:0 \tviewNo: 0 \tseqNo: 0 \trequest: '
+        "DRRequest{operation=AddOp{first=1, second=1}, timestamp=0, "
+        "clientId='client-0'}\n"
+        'LOG-Replica-Commit:1 \tviewNo: 2 \tseqNo: 0 \trequest: '
+        "DRRequest{operation=AddOp{first=2, second=2}, timestamp=1, "
+        "clientId='client-0'}\n"
+        'Timer for Request Timeout - Test duration + sync execution timeout.\n'
+    )
+
+    assert protocol.classify_run(str(run)) == {'Split Brain'}

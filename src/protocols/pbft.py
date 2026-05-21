@@ -75,6 +75,29 @@ class Commit:
     def __str__(self):
         return f'Commit(v={self.view_no}, s={self.seq_no}, r={self.replica_id})'
 
+class Reply:
+    __slots__ = ['view_no', 'seq_no', 'timestamp', 'result', 'replica_id', 'peers']
+
+    def __init__(self, sender: int, msg: dict) -> None:
+        self.view_no = msg.get('view-number', 0)
+        self.seq_no = msg.get('seq-number', msg.get('timestamp', 0))
+        self.timestamp = msg.get('timestamp', 0)
+        self.result = msg.get('result', 0)
+        self.replica_id = msg.get('replica-id', sender)
+        self.peers = {sender}
+
+    def __eq__(self, o):
+        return isinstance(o, Reply) and (
+            self.view_no == o.view_no and self.seq_no == o.seq_no and
+            self.timestamp == o.timestamp and self.result == o.result
+        )
+
+    def __hash__(self):
+        return hash((self.view_no, self.seq_no, self.timestamp, self.result))
+
+    def __str__(self):
+        return f'Reply(v={self.view_no}, s={self.seq_no}, r={self.replica_id}, result={self.result})'
+
 def _extract_vc_proof_fields(prepared_proofs: list) -> dict:
     """Extract sets/counts derived from a VIEW-CHANGE's prepared-proofs list.
 
@@ -187,9 +210,10 @@ class ReplicaCommit:
 
 # ---- Parsing helpers ----
 
-_SENT_RE    = re.compile(r'^Sent:\s+(\d+)\s+->\s+(\d+)\s+(\{.+\})\s+##\d+')
-_DROPPED_RE = re.compile(r'^\s+-\s+Dropped:\s+(\d+)\s+->\s+(\d+)')
-_MUTATED_RE = re.compile(r'^\s+-\s+Mutated:\s+(\d+)\s+->\s+(\d+)(\{.+\})\s+#\d+')
+_SENT_RE    = re.compile(r'^Sent:\s+(\d+)\s+->\s+(\d+)\s+(\{.+\})\s+##(\d+)')
+_SENT_REPLY_RE = re.compile(r'^Sent reply:\s+(\d+)\s+->\s+Client\s+(\{.+\})\s+##(\d+)')
+_DROPPED_RE = re.compile(r'^\s+-\s+Dropped:\s+(\d+)\s+->\s+(\d+)\s*(\{.*\})?(?:\s+##(\d+))?')
+_MUTATED_RE = re.compile(r'^\s+-\s+Mutated:\s+(\d+)\s+->\s+(\d+|client)\s*(\{.+\})(?:\s+#(\d+))?')
 _VIOLATION_RE = re.compile(r'Violation of (\w+) at Replica:\s*(\d+).*viewNo:\s*(\d+).*seqNo:\s*(\d+)')
 _REPLICA_COMMIT_RE = re.compile(
     r'^LOG-Replica-Commit:(\d+)\s+viewNo:\s*(\d+)\s+seqNo:\s*(\d+)\s+'
@@ -270,6 +294,7 @@ _TYPE_CLASSES = {
     'COMMIT':      Commit,
     'VIEW-CHANGE': ViewChange,
     'NEW-VIEW':    NewView,
+    'REPLY':        Reply,
 }
 
 def _parse_inboxes_from_log(text: str) -> dict[int, list]:
@@ -295,22 +320,27 @@ def _parse_inboxes_from_log(text: str) -> dict[int, list]:
     for i, line in enumerate(lines):
         m = _SENT_RE.match(line)
         if m:
-            sender_str, receiver_str, json_str = m.groups()
+            sender_str, receiver_str, json_str, _round_str = m.groups()
             sender = int(sender_str)
             receiver = int(receiver_str)
 
-            # Check if this delivery was dropped (Dropped line immediately follows)
-            if i + 1 in dropped_lines:
-                dm = _DROPPED_RE.match(lines[i + 1])
-                if dm and int(dm.group(1)) == sender and int(dm.group(2)) == receiver:
-                    continue  # Skip dropped delivery
-
-            # If a Mutated line follows for the same sender->receiver,
-            # use the mutated message content (what was actually delivered)
-            if i + 1 in mutated_lines:
-                mm = mutated_lines[i + 1]
-                if int(mm.group(1)) == sender and int(mm.group(2)) == receiver:
-                    json_str = mm.group(3)
+            # Delivery artifacts may be separated from Sent by PRED lines.
+            for j in range(i + 1, min(len(lines), i + 25)):
+                if _SENT_RE.match(lines[j]) or _SENT_REPLY_RE.match(lines[j]):
+                    break
+                if j in dropped_lines:
+                    dm = _DROPPED_RE.match(lines[j])
+                    if dm and int(dm.group(1)) == sender and int(dm.group(2)) == receiver:
+                        json_str = None
+                        break
+                if j in mutated_lines:
+                    mm = mutated_lines[j]
+                    if (int(mm.group(1)) == sender and mm.group(2).isdigit()
+                            and int(mm.group(2)) == receiver):
+                        json_str = mm.group(3)
+                        break
+            if json_str is None:
+                continue
 
             try:
                 msg = json.loads(json_str)
@@ -334,14 +364,32 @@ def _parse_inboxes_from_log(text: str) -> dict[int, list]:
             inboxes.setdefault(replica_id, []).append(
                 ReplicaCommit(replica_id, view_no, seq_no, op_first, op_second, timestamp)
             )
+            continue
+
+        # Client replies are global client-observed messages. Store them in a
+        # synthetic observer inbox so reply quorum events can be synthesized.
+        m = _SENT_REPLY_RE.match(line)
+        if m:
+            sender = int(m.group(1))
+            try:
+                msg = json.loads(m.group(2))
+            except json.JSONDecodeError:
+                continue
+            inboxes.setdefault(0, []).append(Reply(sender, msg))
 
     return inboxes
 
 def _parse_mutations_from_log(text: str) -> list[dict]:
-    """Extract all mutated messages from a PBFT execution log."""
-    
+    """Extract all mutated messages from a PBFT execution log.
+
+    The returned dict is the post-mutation message with parser metadata under
+    ``_sender``, ``_receiver``, ``_round``, ``_line_no``, and, when available,
+    ``_original`` (the immediately preceding Sent message).
+    """
+
     mutations = []
-    for line in text.splitlines():
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
         m = _MUTATED_RE.match(line)
         if not m:
             continue
@@ -351,8 +399,84 @@ def _parse_mutations_from_log(text: str) -> list[dict]:
         except json.JSONDecodeError:
             print(f"Failed to parse JSON: {m.group(3)}")
             continue
+        msg = dict(msg)
+        receiver = m.group(2)
+        msg['_sender'] = int(m.group(1))
+        msg['_receiver'] = int(receiver) if receiver.isdigit() else receiver
+        msg['_round'] = int(m.group(4)) if m.group(4) is not None else None
+        msg['_line_no'] = i
+        for prev in range(i - 1, max(-1, i - 25), -1):
+            sent = _SENT_RE.match(lines[prev])
+            if not sent:
+                continue
+            if sent.group(1) != m.group(1) or sent.group(2) != receiver:
+                continue
+            try:
+                msg['_original'] = json.loads(sent.group(3))
+            except json.JSONDecodeError:
+                pass
+            break
         mutations.append(msg)
     return mutations
+
+def _parse_drops_from_log(text: str) -> list[dict]:
+    """Extract dropped deliveries, including message type and line/round data."""
+    drops = []
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        m = _DROPPED_RE.match(line)
+        if not m:
+            continue
+        msg_type = None
+        round_no = int(m.group(4)) if m.group(4) is not None else None
+        if m.group(3):
+            try:
+                msg_type = json.loads(m.group(3)).get('type')
+            except json.JSONDecodeError:
+                pass
+        if msg_type is None and i > 0:
+            sent = _SENT_RE.match(lines[i - 1])
+            if sent and sent.group(1) == m.group(1) and sent.group(2) == m.group(2):
+                try:
+                    msg_type = json.loads(sent.group(3)).get('type')
+                    round_no = int(sent.group(4))
+                except json.JSONDecodeError:
+                    pass
+        view_no = seq_no = None
+        if m.group(3):
+            try:
+                drop_msg = json.loads(m.group(3))
+                view_no = drop_msg.get('view-number')
+                seq_no = drop_msg.get('seq-number')
+            except json.JSONDecodeError:
+                pass
+        drops.append({
+            'sender': int(m.group(1)),
+            'receiver': int(m.group(2)),
+            'type': msg_type,
+            'round': round_no,
+            'view_no': view_no,
+            'seq_no': seq_no,
+            'line_no': i,
+        })
+    return drops
+
+def _parse_replica_commits_from_log(text: str) -> list[dict]:
+    """Extract application-level commits from LOG-Replica-Commit lines."""
+    commits = []
+    for i, line in enumerate(text.splitlines()):
+        m = _REPLICA_COMMIT_RE.match(line)
+        if not m:
+            continue
+        commits.append({
+            'replica': int(m.group(1)),
+            'view_no': int(m.group(2)),
+            'seq_no': int(m.group(3)),
+            'operation': (int(m.group(4)), int(m.group(5))),
+            'timestamp': int(m.group(6)),
+            'line_no': i,
+        })
+    return commits
 
 def _parse_violations_from_log(text: str) -> list[dict]:
     """Extract all violations from a PBFT execution log."""
@@ -367,6 +491,81 @@ def _parse_violations_from_log(text: str) -> list[dict]:
             'view_no': int(view_no), 'seq_no': int(seq_no),
         })
     return violations
+
+def _operation_tuple(msg: dict) -> tuple[int, int] | None:
+    op = msg.get('operation')
+    if not isinstance(op, dict):
+        return None
+    first, second = op.get('first'), op.get('second')
+    if isinstance(first, int) and isinstance(second, int):
+        return (first, second)
+    return None
+
+def _commit_split_brain(commits: list[dict]) -> bool:
+    """Return True if a high-view commit conflicts with same-seq commits."""
+    by_seq: dict[int, dict[tuple[int, int], set[tuple[int, int]]]] = {}
+    for commit in commits:
+        by_seq.setdefault(commit['seq_no'], {}).setdefault(
+            commit['operation'], set()
+        ).add((commit['replica'], commit['view_no']))
+    for op_to_commits in by_seq.values():
+        has_high_view_commit = any(
+            view_no >= 2
+            for commits_for_op in op_to_commits.values()
+            for _replica, view_no in commits_for_op
+        )
+        if len(op_to_commits) < 2:
+            continue
+        if has_high_view_commit and sum(len(c) for c in op_to_commits.values()) >= 2:
+            return True
+    return False
+
+def _preprepare_mutation_committed(mutation: dict, commits: list[dict]) -> bool:
+    """Return True when a PRE-PREPARE mutation is reflected in a commit."""
+    if mutation.get('type') != 'PRE-PREPARE':
+        return False
+
+    original = mutation.get('_original')
+    if not isinstance(original, dict) or original.get('type') != 'PRE-PREPARE':
+        return False
+
+    mutated_op = _operation_tuple(mutation)
+    original_op = _operation_tuple(original)
+    mutated_seq = mutation.get('seq-number')
+    original_seq = original.get('seq-number')
+    mutated_ts = mutation.get('timestamp')
+    original_ts = original.get('timestamp')
+
+    if mutated_op is None or not isinstance(mutated_seq, int):
+        return False
+
+    changed = (
+        mutated_op != original_op or
+        mutated_seq != original_seq or
+        mutated_ts != original_ts
+    )
+    if not changed:
+        return False
+
+    for commit in commits:
+        if commit['seq_no'] != mutated_seq:
+            continue
+        if commit['operation'] != mutated_op:
+            continue
+        if mutated_ts is None or commit['timestamp'] == mutated_ts:
+            return True
+    return False
+
+def _partition_precedes_mutation(drops: list[dict], mutations: list[dict]) -> bool:
+    """Whether consensus-message drops already appear before any mutation."""
+    first_mutation_line = min((m.get('_line_no', 10**12) for m in mutations),
+                              default=10**12)
+    consensus_types = {'PRE-PREPARE', 'PREPARE', 'COMMIT'}
+    return any(
+        drop.get('line_no', 10**12) < first_mutation_line and
+        drop.get('type') in consensus_types
+        for drop in drops
+    )
 
 # ---- Protocol class ----
 
@@ -415,6 +614,11 @@ class PBFTProtocol(ConsensusProtocol):
             (Commit,     'view_no',             'view_current'),
             (Commit,     'seq_no',              'seqno'),
             (Commit,     'peers',               set[int]),
+            (Reply,      'view_no',             'view_current'),
+            (Reply,      'seq_no',              'seqno'),
+            (Reply,      'timestamp',           'time'),
+            (Reply,      'result',              'op'),
+            (Reply,      'peers',               set[int]),
             (ViewChange, 'new_view_no',           'view_next'),
             (ViewChange, 'last_seq_no',           'seqno'),
             (ViewChange, 'peers',                 set[int]),
@@ -496,38 +700,36 @@ class PBFTProtocol(ConsensusProtocol):
 
         violations = _parse_violations_from_log(text)
         mutations  = _parse_mutations_from_log(text)
+        drops      = _parse_drops_from_log(text)
+        commits    = _parse_replica_commits_from_log(text)
         groups     = set()
-
-        partition = self._config_has_partition(run_path)
 
         preprepare_ms = [m for m in mutations if m.get('type') == 'PRE-PREPARE']
         vc_nv_mutated = any(m.get('type') in ('VIEW-CHANGE', 'NEW-VIEW') for m in mutations)
         non_pp_mutated = any(m.get('type') in ('PREPARE', 'COMMIT', 'REPLY') for m in mutations)
+        partition_dominated = (
+            self._config_has_partition(run_path) and
+            _partition_precedes_mutation(drops, mutations)
+        )
 
-        has_validity_or_agreement = any(v['type'] in ('VALIDITY', 'AGREEMENT') for v in violations)
         has_termination = has_timer_timeout or has_reached_no_complete
         agreement_at_high_view = any(v['type'] == 'AGREEMENT' and v['view_no'] >= 2 for v in violations)
 
-        # Operation Corruption: PP content tampered (op mutation at correct slot,
-        # or old request replayed at higher slot). Merges Invalid Operation and
-        # Seq-No Replay — same root cause family (primary's proposal corrupted).
-        for m in preprepare_ms:
-            ts, seq = m.get('timestamp'), m.get('seq-number')
-            if ts is None or seq is None:
-                continue
-            if ts == seq and 'operation' in m:
-                if has_validity_or_agreement or (not partition and not violations):
-                    groups.add('Operation Corruption')
-            elif ts < seq:
-                groups.add('Operation Corruption')
+        # Operation Corruption: a landed PRE-PREPARE mutation affected the
+        # application-level commit stream.  This intentionally ignores
+        # PRE-PREPARE mutations that are visible but never committed, allowing
+        # partition-only stalls to remain Partition Timeout.
+        if any(_preprepare_mutation_committed(m, commits) for m in preprepare_ms):
+            groups.add('Operation Corruption')
 
         # View-Change Fault: VC/NV mutation with causal evidence
         # (timeout or AGREEMENT at view>=1).
         if vc_nv_mutated and (has_termination or any(v['type'] == 'AGREEMENT' and v['view_no'] >= 1 for v in violations)):
             groups.add('View-Change Fault')
 
-        # Split Brain: AGREEMENT violation at view_no >= 2 (multi-view safety break).
-        if agreement_at_high_view:
+        # Split Brain: direct commit-log disagreement, with the historical
+        # high-view AGREEMENT violation retained as supporting evidence.
+        if _commit_split_brain(commits) or agreement_at_high_view:
             groups.add('Split Brain')
 
         # Liveness-stall fallback, split by observable mutation footprint:
@@ -539,7 +741,7 @@ class PBFTProtocol(ConsensusProtocol):
         #     mutation visible (Group D). The classifier reaches here only when
         #     OC, VCF, SB did not fire.
         if not groups:
-            if non_pp_mutated:
+            if non_pp_mutated and not partition_dominated:
                 groups.add('Non-PP Mutation')
             else:
                 groups.add('Partition Timeout')
