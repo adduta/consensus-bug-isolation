@@ -170,12 +170,16 @@ class LightweightReport:
         self.name = name
 
 
-def run_message_based_analysis(protocol: ConsensusProtocol = None):
+def run_message_based_analysis(protocol: ConsensusProtocol = None, limit: int | None = None):
     """
     Run message-based consensus-aware analysis pipeline.
 
     Evaluates predicates on message pairs from validator logs and performs
     statistical fault localization to identify failure-correlated predicates.
+
+    Args:
+        protocol: A ConsensusProtocol; defaults to XRPL.
+        limit:    Cap the number of discovered runs (for quick prototyping).
     """
     if protocol is None:
         from src.protocols.xrpl import XRPLProtocol
@@ -191,6 +195,9 @@ def run_message_based_analysis(protocol: ConsensusProtocol = None):
 
     # Discover all run paths via protocol (handles protocol-specific data directory)
     paths = protocol.get_run_paths()
+    if limit is not None:
+        paths = paths[:limit]
+        print(f'limiting to first {len(paths)} runs (--limit)')
 
     reports = []
     aggregation = {}
@@ -264,4 +271,13 @@ def run_message_based_analysis(protocol: ConsensusProtocol = None):
 
 
 if __name__ == '__main__':
-    run_message_based_analysis()
+    import argparse
+    from src.protocols import PROTOCOL_CHOICES, make_protocol
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--protocol', choices=PROTOCOL_CHOICES, default='xrpl',
+                        help='Which consensus protocol adapter to use.')
+    parser.add_argument('--limit', type=int, default=None,
+                        help='Cap the number of discovered runs (quick prototyping).')
+    args = parser.parse_args()
+    run_message_based_analysis(make_protocol(args.protocol), limit=args.limit)

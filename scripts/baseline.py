@@ -60,4 +60,17 @@ def run_baseline_analysis(protocol=None):
 
 
 if __name__ == '__main__':
-    run_baseline_analysis()
+    import argparse
+    from src.protocols import PROTOCOL_CHOICES, make_protocol
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--protocol', choices=PROTOCOL_CHOICES, default='xrpl',
+                        help='Which consensus protocol adapter to use.')
+    args = parser.parse_args()
+
+    protocol = make_protocol(args.protocol)
+    if args.protocol == 'redisraft':
+        # ModelFuzz traces do not carry PRED annotations.
+        print('redisraft has no PRED-based baseline; skipping.')
+    else:
+        run_baseline_analysis(protocol)

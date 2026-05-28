@@ -181,4 +181,13 @@ def stats(filters, protocol=None, return_agg=False, use_baseline_configs=False):
         return agg
 
 if __name__ == '__main__':
-    stats([])
+    import argparse
+    from src.protocols import PROTOCOL_CHOICES, make_protocol
+
+    parser = argparse.ArgumentParser(description='Print the per-bug confusion matrix for a protocol.')
+    parser.add_argument('--protocol', choices=PROTOCOL_CHOICES, default='xrpl',
+                        help='Which consensus protocol adapter to use.')
+    # Ignore the legacy positional `cap N` and `show <run>` forms — they are
+    # consumed by module-top-level parsing.
+    args, _ = parser.parse_known_args()
+    stats([], protocol=make_protocol(args.protocol))

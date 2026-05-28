@@ -25,11 +25,13 @@ from ..models.predicates import Assertion, Predicate
 from ..protocols.base import ConsensusProtocol
 
 _PROTOCOL = None   # Set by set_protocol() before any worker processes are spawned
+_PREDICATE_BUILD_CACHE = None
 
 def set_protocol(protocol: ConsensusProtocol) -> None:
     """Set the protocol for the cache generation."""
-    global _PROTOCOL
+    global _PROTOCOL, _PREDICATE_BUILD_CACHE
     _PROTOCOL = protocol
+    _PREDICATE_BUILD_CACHE = None
 
 class CachedPredicate:
     """
@@ -171,8 +173,13 @@ OPERATORS_BY_TYPE = {
     'view_current': [op.eq, op.ne, op.lt, op.gt],
     'view_next':    [op.eq, op.ne, op.lt, op.gt],
     'seqno':      [op.eq, op.ne, op.lt, op.gt],
+    'term':       [op.eq, op.ne, op.lt, op.gt],
+    'log_term':   [op.eq, op.ne, op.lt, op.gt],
+    'log_index':  [op.eq, op.ne, op.lt, op.gt],
+    'count':      [op.eq, op.ne, op.lt, op.gt],
     'rid':        [op.eq, op.ne],
     'op':         [op.eq, op.ne],
+    'action':     [op.eq, op.ne],
     'op_first':   [op.eq, op.ne],
     'op_second':  [op.eq, op.ne],
     'proof_count':[op.eq, op.ne, op.lt, op.gt],
@@ -191,6 +198,8 @@ OPERATORS_BY_TYPE = {
     'prep_replica_set':  [op.eq, op.ne],
     'vc_replica_set':    [op.eq, op.ne],
     'vc_inner_last_seq_set': [op.eq, op.ne],
+    # RedisRaft response booleans (AppendEntriesResp.reject, RequestVoteResp.reject).
+    'reject':            [op.eq, op.ne],
 }
 
 def build_predicates(protocol) -> tuple[list[Predicate], dict]:
@@ -237,6 +246,19 @@ def build_predicates(protocol) -> tuple[list[Predicate], dict]:
 
     return predicates, predicates_by_type
 
+
+def get_predicates_by_type(protocol) -> dict:
+    """Return a worker-local predicate catalog for the active protocol.
+
+    Building the exhaustive predicate set is deterministic but expensive.
+    Cache it once per worker process and create fresh PredicateState wrappers
+    for each run/node task.
+    """
+    global _PREDICATE_BUILD_CACHE
+    if _PREDICATE_BUILD_CACHE is None:
+        _, _PREDICATE_BUILD_CACHE = build_predicates(protocol)
+    return _PREDICATE_BUILD_CACHE
+
 # Partition predicates by message type pairs for faster lookup
 # This allows us to only evaluate relevant predicates for each message pair
 predicates_by_type: dict[tuple[type, type], list[Predicate]] = {}
@@ -246,9 +268,10 @@ for predicate in predicates:
         predicates_by_type[key] = []
     predicates_by_type[key].append(predicate)
 
-print(f"Predicates partitioned: {len(predicates_by_type)} type pairs")
-for key, pred_list in predicates_by_type.items():
-    print(f"  {key[0].__name__}->{key[1].__name__}: {len(pred_list)} predicates")
+if predicates:
+    print(f"Predicates partitioned: {len(predicates_by_type)} type pairs")
+    for key, pred_list in predicates_by_type.items():
+        print(f"  {key[0].__name__}->{key[1].__name__}: {len(pred_list)} predicates")
 
 
 def load_predicate_cache(args):
@@ -324,7 +347,7 @@ def generate_predicate_cache(args):
     messages = _PROTOCOL.parse_log(log_path)
     messages = _PROTOCOL.filter_messages(messages, node_id)
 
-    _, predicates_by_type = build_predicates(_PROTOCOL)
+    predicates_by_type = get_predicates_by_type(_PROTOCOL)
     active_predicates_by_type: dict = {}
     all_predicate_states = []
 
