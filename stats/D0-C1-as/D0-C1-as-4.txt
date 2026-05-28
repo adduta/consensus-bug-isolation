@@ -1,2 +1,0 @@
-../out/tests-D0-C1-as/out108.txt
-../out/tests-D0-C1-as/out121.txt

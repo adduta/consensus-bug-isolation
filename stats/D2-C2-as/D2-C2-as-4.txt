@@ -1,5 +1,0 @@
-../out/tests-D2-C2-as/out58.txt
-../out/tests-D2-C2-as/out15.txt
-../out/tests-D2-C2-as/out143.txt
-../out/tests-D2-C2-as/out181.txt
-../out/tests-D2-C2-as/out112.txt
